@@ -1,10 +1,14 @@
-# FXSimulator — M1（市場引擎 + 帳戶 + CLI）
+# FXSimulator — M1（市場引擎 + 帳戶 + CLI）＋ M2（HTTP API + WebSocket）
 
-依 `FXSimulator-Spec.md` **v0.25** 實作的 **M1 里程碑**：A/B 合成標的（CFD）的市場引擎、逐倉帳戶、
-強平與持倉費、SQLite 持久化、CLI 情境驗證。**沒有前端**（前端是 M2）。
+依 `FXSimulator-Spec.md` **v0.25** 實作：
+
+- **M1 里程碑**：A/B 合成標的（CFD）的市場引擎、逐倉帳戶、強平與持倉費、SQLite 持久化、CLI 情境驗證。
+- **M2 里程碑**（本次新增）：Fastify HTTP API、WebSocket 即時協定、每秒 tick 迴圈、靜態頁骨架。
+  前端正式介面由前端工作流提供，`public/index.html` 目前只是佔位頁。
 
 - 純 ESM JavaScript（Node 20+），**無 TypeScript、無建置步驟**
-- 唯一相依套件：`better-sqlite3`（原生模組；以動態 `import()` 載入，純邏輯測試可在原生模組缺席時執行）
+- 唯一原生相依套件：`better-sqlite3`（以動態 `import()` 載入，純邏輯測試可在原生模組缺席時執行）；
+  其餘為純 JS：`fastify`、`@fastify/websocket`、`@fastify/static`、`ws`
 - 所有隨機性走 `src/rng.js`（mulberry32），**同種子可完全重播**
 - **經濟邏輯不使用 wall clock**：`tick_id` 是唯一真相
 
@@ -15,6 +19,7 @@
 ```bash
 npm install          # 需要 node-gyp（Python + C++ 工具鏈）才能建置 better-sqlite3
 npm test             # node --test
+npm start            # 啟動 HTTP + WebSocket 伺服器（127.0.0.1:2641）
 node src/cli.js init
 ```
 
@@ -32,9 +37,16 @@ npm 11.16+ 另有安裝腳本白名單機制，套件已於 `package.json` 的 `
 | `src/market.js` | 價格引擎：OU + 事件三層 + 玩家衝擊 + 流動性深度 L |
 | `src/account.js` | 帳戶：收入、開平倉、衝擊成交價、強平、停損停利、持倉費 |
 | `src/db.js` | §6.2 schema（WAL）、記憶體 store 與 SQLite store、save/load |
-| `src/engine.js` | tick 協調：事件+OU、分鐘 K 線、強平檢查、持久化 |
+| `src/engine.js` | tick 協調：事件+OU、分鐘 K 線、強平檢查、持久化；M2 加 `onEvent` / `onLiquidation` / `onPositionClosed` 通知鉤子 |
+| `src/serialize.js` | **M2**：唯一對外輸出的序列化層（狀態 / tick / 持倉 / K 線 / 事件；事件永不輸出 `type`、`permanent_share`） |
+| `src/api.js` | **M2**：REST 路由（`/healthz`、`/api/*`）＋ WebSocket `/ws` 協定處理 |
+| `src/live.js` | **M2**：live hub（連線登錄簿、每秒 tick 廣播、事件廣播、強平通知、漂移校正 tick 迴圈） |
+| `src/server.js` | **M2**：Fastify app（websocket + 靜態檔）、listen、優雅關機 |
 | `src/scenarios.js` | §10 驗收情境（roundtrip / pump / liquidation / gap / opposing） |
 | `src/cli.js` | CLI：`init` `status` `tick` `open` `close` `candles` `events` `scenario` `reset` |
+| `public/index.html` | **M2**：佔位頁（正式介面由前端工作流提供） |
+| `test/api.test.js` | **M2**：REST + WebSocket 驗收（`fastify.inject` ＋ `ws`） |
+
 
 ## CLI
 
@@ -52,6 +64,55 @@ node src/cli.js reset                                   #  刪庫重來
 
 通用選項：`--db <path>`（或 `FXSIM_DB` 環境變數）、`--seed <n>`、`--user <id>`。
 `--sl` / `--tp` 的單位是**百分比數字**（`0.5` = 0.5%）。
+
+---
+
+## M2 伺服器（HTTP + WebSocket）
+
+```bash
+npm start    # node src/server.js
+```
+
+| 環境變數 | 預設 | 說明 |
+|----------|------|------|
+| `HOST` | `127.0.0.1` | 監聽位址（對外由 nginx 反代） |
+| `PORT` | `2641` | 監聽埠 |
+| `FXSIM_DB` | `./fxsim.db` | SQLite 路徑 |
+| `FXSIM_SEED` | `42` | RNG 種子 |
+
+nginx 會剝掉 `/FXSimulator/` 前綴（`proxy_pass http://127.0.0.1:2641/`），因此本服務自帶路徑：
+`/`（靜態頁）、`/api/*`、`/ws`。
+
+### REST
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| GET | `/healthz` | `{ ok, tick_id, uptime_s }` |
+| GET | `/api/config` | 槓桿選項、最小保證金、上限、費率 |
+| GET | `/api/state?user=1` | 完整狀態（market / account / positions / candles / events） |
+| GET | `/api/candles?limit=60` | 1 分 K，**最舊 → 最新**，上限 600 |
+| GET | `/api/events?limit=100` | 事件，**最新 → 最舊**；**永不**含 `type` / `permanent_share` |
+| POST | `/api/open` | `{ side, margin_a, leverage, sl_pct?, tp_pct? }` → `{ ok, position, fill }` |
+| POST | `/api/close` | `{ position_id }` → `{ ok, exit_price_e4, pnl_milli }` |
+
+### WebSocket `/ws?user=1`
+
+- 伺服器 → 客戶端：`snapshot`（連線即送）｜`tick`（每秒）｜`order.filled` / `order.rejected`
+  （回傳 `request_id`）｜`liquidation`（只送受影響的使用者）｜`event`｜`pong`
+- 客戶端 → 伺服器：`order.open`｜`order.close`｜`ping`
+- 重連後伺服器會重新送 `snapshot`，前端以 `snapshot` 覆蓋本地狀態。
+
+### 單位與認證（M2 臨時制）
+
+- 金額一律**整數 milli-A**（`_milli`）、價格一律**整數 e4**（`_e4`）、百分比為小數比例。
+- `sl_pct` / `tp_pct` 依 contract 請求範例以**百分比數字**解讀（`0.5` = 0.5%）；
+  若百分比解讀違反引擎限制而小數比例解讀合法，則自動改採小數比例（相容兩種前端寫法）。
+- 暫時無登入：使用者 id 取自 `?user=<id>` 或標頭 `x-user-id`，預設 `1`；
+  **全部集中在 `src/api.js` 的 `resolveUserId()`**，M3 換成 session cookie 時只改這一處。
+
+### 優雅關機
+
+收到 `SIGTERM` / `SIGINT` → 停止 tick 迴圈 → 寫回引擎狀態 → 關閉 HTTP → 關閉 SQLite。
 
 ---
 
@@ -157,7 +218,10 @@ P      = P_base × (1 + 0.2 × tanh(N / L))
 npm test
 ```
 
-`node --test`（無框架、無 watch）。共 15 個測試（規格要求 10 個 + 5 個補充）：
+`node --test`（無框架、無 watch）。共 **31 個測試**：M1 的 15 個（規格要求 10 個 + 5 個補充）
+＋ M2 的 16 個（REST / WebSocket）。
+
+### M1（15 個）
 
 | # | 測試 | 對應規格 |
 |---|------|---------|
@@ -177,12 +241,35 @@ npm test
 | 10b | 結構事件 100% 永久、新聞事件無永久比例 | §4.2 |
 | 10c | 同種子重播事件序列可重現 | §4.2 |
 
-測試 8、8b 需要 `better-sqlite3`；若原生模組不可用會自動 **skip**（其餘 13 個仍會跑）。
+### M2（16 個，`test/api.test.js`）
 
-## 尚未包含（M2 / M3 範圍）
+| # | 測試 | 對應 contract |
+|---|------|---------|
+| A1 | `GET /healthz` → `ok` / `tick_id` / `uptime_s` | REST |
+| A2 | `GET /api/state` → 起始餘額 100,000 A、market / account 欄位 | REST / M2 acceptance |
+| A3 | `GET /api/config` → 槓桿、最小保證金、費率 | REST |
+| A4 | `POST /api/open` 1,000 A × 10 → 10,000 A 名目 | M2 acceptance |
+| A5 | `POST /api/close` → 立刻平倉負損益 | M2 acceptance |
+| A6 | 拒絕原因為穩定機器字串（`invalid_side` / `invalid_leverage` / `insufficient_balance` / `not_found`） | REST |
+| A7 | `GET /api/candles` → 最舊 → 最新、上限 600 | REST |
+| A8 | `GET /api/events` → 最新 → 最舊、無 `type` / `permanent_share` | REST / §7.7 |
+| A9 | 任何 API / WS payload 都不得出現 `type` / `permanent_share` | M2 acceptance |
+| A10 | WS：連線立即收到 `snapshot`，之後每秒收到 `tick` | WS |
+| A11 | WS：`order.open` → `order.filled`（回傳 `request_id`）；`order.close` 同；拒絕回 `order.rejected` | WS |
+| A12 | WS：身分不符的訂單一律拒絕（`user_mismatch`） | WS |
+| A13 | 靜態頁 `GET /` 回傳 `public/index.html`（無外部 CDN） | §9 |
+| A14 | WS：真實 tick 迴圈定期推送 `tick`（`tick_id` 遞增） | WS / §4.4 |
+| A15 | WS：新事件廣播 `event`（且不含 `type` / `permanent_share`） | WS / §7.7 |
+| A16 | WS：強平只通知受影響的使用者 | WS |
 
-- WebSocket / HTTP API、前端（§7、§8）
-- Google 登入與 session（§6.1）
+測試 8、8b 與全部 M2 測試需要 `better-sqlite3`；若原生模組不可用會自動 **skip**
+（M1 純邏輯測試仍會跑）。每個 M2 測試都使用**全新的暫存 DB**，且**不啟動真實 tick 迴圈**
+（`buildServer({ live: false })`），需要時間推進時由測試手動呼叫 `engine.tick()`。
+
+## 尚未包含（M3 範圍）
+
+- Google 登入與 session（§6.1，M2 為臨時 `?user=` 認證）
+- 正式前端介面（§7；`public/index.html` 目前只是佔位頁）
 - 離線自動規則引擎與離線報告（§6.3、§6.4）
 - 條件開倉規則、平倉後自動再下單（§7.5）
 - 裝飾、排行榜、破產重整（post-alpha）

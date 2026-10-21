@@ -1,18 +1,23 @@
 {
   "name": "fxsim-m1",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "FXSimulator M1 - market engine + account + CLI simulation (no frontend)",
+  "description": "FXSimulator M2 - market engine + REST API + WebSocket (frontend served from public/)",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "test": "node --test",
+    "start": "node src/server.js",
     "cli": "node src/cli.js"
   },
   "dependencies": {
-    "better-sqlite3": "^11"
+    "@fastify/static": "^10.1.6",
+    "@fastify/websocket": "^11.3.4",
+    "better-sqlite3": "^11",
+    "fastify": "^5.12.7",
+    "ws": "^8"
   },
   "allowScripts": {
     "better-sqlite3": true

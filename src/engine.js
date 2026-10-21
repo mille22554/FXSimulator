@@ -80,6 +80,14 @@ export class Engine {
     this._loading = false;
     this._restoredFromState = false;
 
+    // M2：對外通知用的鉤子（不參與任何經濟計算，只負責「把已發生的結果通知出去」）
+    //   onEvent(event)          → 新事件（payload 已濾掉 type / permanent_share）
+    //   onLiquidation(info)     → 強平（user_id / position_id / price_e4 / pnl_milli）
+    //   onPositionClosed(info)  → 停損停利平倉（kind: 'stop'）
+    this.onEvent = null;
+    this.onLiquidation = null;
+    this.onPositionClosed = null;
+
     this.market.onPriceChange = (price, basePrice) => this.#recordPrice(price, basePrice);
     this.market.onEvent = (ev) => this.#persistEvent(ev);
   }
@@ -271,12 +279,14 @@ export class Engine {
 
     // 3) 停損 / 停利
     for (const acct of this.accounts.values()) {
-      acct.checkStopOrders({ market: this.market, tickCount: this.ticksExecuted });
+      const stopped = acct.checkStopOrders({ market: this.market, tickCount: this.ticksExecuted });
+      for (const r of stopped) this.#notifyPositionClosed(r, 'stop');
     }
 
     // 4) 強平（先收集全部觸發 → 再依序平倉並重算價格）
     for (const acct of this.accounts.values()) {
-      acct.liquidateIfNeeded({ market: this.market, tickCount: this.ticksExecuted });
+      const liquidations = acct.liquidateIfNeeded({ market: this.market, tickCount: this.ticksExecuted });
+      for (const r of liquidations) this.#notifyLiquidated(r);
     }
 
     // 5) 分鐘收線
@@ -516,6 +526,38 @@ export class Engine {
       type: ev.type,
       permanentShare: ev.permanentShare,
       halfLifeSec: ev.halfLifeSec,
+    });
+    // M2：通知上層（payload 已濾掉 type / permanent_share，見 spec §7.7）
+    if (this.onEvent) {
+      this.onEvent({
+        id: ev.id,
+        tick_id: ev.ts ?? this.ticksExecuted - 1,
+        headline: ev.headline ?? '',
+        impact_jump: ev.pct ?? 0,
+      });
+    }
+  }
+
+  /** M2：強平通知（給 WS 推給受影響的使用者） */
+  #notifyLiquidated(r) {
+    if (!this.onLiquidation) return;
+    this.onLiquidation({
+      user_id: r.position.userId,
+      position_id: r.position.id,
+      price_e4: r.exitPriceE4,
+      pnl_milli: r.pnlMilli,
+    });
+  }
+
+  /** M2：停損停利平倉通知 */
+  #notifyPositionClosed(r, kind) {
+    if (!this.onPositionClosed) return;
+    this.onPositionClosed({
+      user_id: r.position.userId,
+      position_id: r.position.id,
+      price_e4: r.exitPriceE4,
+      pnl_milli: r.pnlMilli,
+      kind,
     });
   }
 }

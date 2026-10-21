@@ -89,6 +89,16 @@ export class Position {
     return roundHalfUp((diff * this.notionalMilli) / this.entryPriceE4);
   }
 
+  /**
+   * API 用的 `pnl_milli`：未平倉部位 = 以當前標記價計算的浮動損益；
+   * 已平倉部位 = 已實現損益。整數 milli-A。
+   * @param {number|null} markE4 當前標記價（e4 整數）
+   */
+  pnlMilliAt(markE4) {
+    if (this.status === 'open' && markE4 != null) return this.floatingPnlMilli(markE4);
+    return this.pnlMilli ?? 0;
+  }
+
   /** 未實現虧損（正數） */
   unrealizedLossMilli(markE4) {
     return Math.max(0, -this.floatingPnlMilli(markE4));
