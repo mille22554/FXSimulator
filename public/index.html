@@ -1,46 +1,168 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-Hant">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>FXSimulator</title>
-    <style>
-      :root {
-        color-scheme: dark;
-      }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        background: #0b0e14;
-        color: #e6edf3;
-        font: 14px/1.6 system-ui, "Segoe UI", "Noto Sans TC", sans-serif;
-      }
-      main {
-        text-align: center;
-        padding: 24px;
-      }
-      h1 {
-        font-size: 20px;
-        letter-spacing: 0.08em;
-        margin: 0 0 12px;
-      }
-      p {
-        margin: 4px 0;
-        color: #8b98a9;
-      }
-      code {
-        color: #7ee787;
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>FXSimulator — M2 骨架</h1>
-      <p>後端已就緒：<code>/healthz</code>、<code>/api/state</code>、<code>/api/candles</code>、<code>/api/events</code>、<code>/ws</code>。</p>
-      <p>正式交易介面由前端工作流提供（本頁為佔位頁，無任何外部 CDN 依賴）。</p>
-      <p>模擬遊戲、非投資建議、無真實金錢。</p>
-    </main>
-  </body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1280">
+<title>FXSimulator — 交易</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0d13'/%3E%3Cpath d='M6 20 L12 13 L16 17 L26 6' stroke='%2326d07c' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ═══ 頂部帳戶列 ═══ -->
+  <header id="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 23 L11 14 L16 18 L29 5" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <b>FXSIM</b><span class="brand-sub">模擬交易終端</span>
+    </div>
+    <dl class="top-stats" role="group" aria-label="帳戶現況">
+      <div class="stat"><dt>餘額</dt><dd class="mono" id="statBalance">—</dd><small>A</small></div>
+      <div class="stat"><dt>可用</dt><dd class="mono" id="statAvailable">—</dd><small>A</small></div>
+      <div class="stat"><dt>淨值</dt><dd class="mono" id="statEquity">—</dd><span class="dir-arrow" id="equityArrow" aria-hidden="true"></span><small>A</small></div>
+      <div class="stat"><dt>淨部位</dt><dd class="mono" id="statNetPos">—</dd></div>
+      <div class="stat"><dt>已用保證金</dt><dd class="mono" id="statMargin">—</dd><small>A</small></div>
+    </dl>
+    <div class="top-right">
+      <div class="quote-mini" aria-label="目前價格">
+        <span class="sym">A/B</span>
+        <b class="mono" id="tickPrice">—</b>
+        <span class="mono" id="tickDelta"></span>
+      </div>
+      <span class="mono tz" id="serverClock">--:--:--</span>
+      <div id="connBadge" class="conn conn-connecting" role="status" aria-live="polite">
+        <span class="conn-dot" aria-hidden="true"></span><span id="connText">連線中…</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══ 主區：圖表 ┼ 下單面板 ┼ 新聞看板 ═══ -->
+  <main class="main">
+
+    <!-- ─ 左：走勢圖 ─ -->
+    <section id="chartPane" aria-label="A/B 走勢圖">
+      <div class="chart-head">
+        <div class="chart-title">
+          <span class="sym-lg">A/B</span>
+          <b class="mono" id="chartPrice">—</b>
+          <span class="mono chg" id="chartChange"></span>
+          <span class="mono dim" id="chartRange"></span>
+        </div>
+        <div class="mode-tabs" role="tablist" aria-label="圖表模式">
+          <button class="mode-tab active" data-mode="line"  role="tab" aria-selected="true">折線</button>
+          <button class="mode-tab" data-mode="m1" role="tab" aria-selected="false">1分K</button>
+          <button class="mode-tab" data-mode="m5" role="tab" aria-selected="false">5分K</button>
+        </div>
+      </div>
+      <div class="chart-body">
+        <div class="chart-cell"><canvas id="chartMain" tabindex="0" aria-label="A/B 走勢主圖（懸停可看十字線與事件）"></canvas></div>
+        <div class="chart-cell chart-cell-sub"><canvas id="chartSub" aria-label="全服淨部位副圖"></canvas>
+          <span class="sub-label">全服淨部位</span></div>
+      </div>
+      <div id="chartTip" class="chart-tip" hidden></div>
+    </section>
+
+    <!-- ─ 右：下單面板 ─ -->
+    <aside id="orderPane" aria-label="下單面板">
+      <h2 class="pane-title">下單</h2>
+
+      <div class="f-group">
+        <label class="f-label">槓桿</label>
+        <div class="lev-row" id="levRow" role="radiogroup" aria-label="槓桿倍數"></div>
+      </div>
+
+      <div class="f-group">
+        <div class="f-label-row">
+          <label class="f-label" for="marginInput">保證金 <small>（A，最大損失）</small></label>
+          <span class="mono dim" id="marginHint"></span>
+        </div>
+        <div class="margin-row">
+          <input id="marginInput" type="number" inputmode="numeric" step="10" min="0" value="1000" aria-label="保證金金額（A 幣）">
+          <input id="marginSlider" type="range" min="1000" max="100000" step="10" value="1000" aria-label="保證金拉桿">
+        </div>
+        <p class="f-note" id="marginNote" hidden></p>
+      </div>
+
+      <div class="preview" aria-live="polite">
+        <div class="pv-row"><span>名目</span><b class="mono" id="pvNotional">—</b></div>
+        <div class="pv-row"><span>預估成交</span><b class="mono"><span class="up" id="pvFillBuy">—</span><span class="dim"> / </span><span class="down" id="pvFillSell">—</span></b></div>
+        <div class="pv-row"><span>強平</span><b class="mono" id="pvLiq">—</b><small class="dim" id="pvLiqDist"></small></div>
+        <div class="pv-row"><span>持倉費</span><b class="mono"><span id="pvFeeBuy">—</span><span class="dim"> / </span><span id="pvFeeSell">—</span></b><small class="dim">A／時</small></div>
+        <div class="pv-row"><span>保證金</span><b class="mono" id="pvMargin">—</b><small class="dim">點差內含</small></div>
+        <p class="pv-warn" id="bigOrderWarn" hidden><b>大單</b>：超過可用 50%，最大損失 <span class="mono" id="bigOrderLoss"></span> A</p>
+      </div>
+
+      <div class="f-group f-sltp">
+        <div class="sltp-col">
+          <label class="f-label" for="slInput">停損 %</label>
+          <input id="slInput" type="number" inputmode="decimal" step="0.05" min="0" placeholder="不設">
+          <span class="mono f-price" id="slPrice"></span>
+        </div>
+        <div class="sltp-col">
+          <label class="f-label" for="tpInput">停利 %</label>
+          <input id="tpInput" type="number" inputmode="decimal" step="0.05" min="0" placeholder="不設">
+          <span class="mono f-price" id="tpPrice"></span>
+        </div>
+      </div>
+      <p class="f-note" id="sltpNote" hidden></p>
+
+      <div class="f-group f-reentry">
+        <label class="check">
+          <input type="checkbox" id="reentryCheck">
+          <span>平倉後自動再下單 <b class="mono reentry-count" id="reentryCount">0/3</b></span>
+        </label>
+      </div>
+
+      <div class="cta-row">
+        <button id="btnSell" class="cta cta-sell">賣出</button>
+        <button id="btnBuy" class="cta cta-buy">買入</button>
+      </div>
+      <p class="cta-note dim" id="ctaNote">不做二次確認，按下即送出。</p>
+    </aside>
+
+    <!-- ─ 右二代：新聞看板（可收合） ─ -->
+    <aside id="newsPane" class="news-open" aria-label="新聞看板">
+      <button id="newsToggle" class="news-toggle" aria-expanded="true" aria-controls="newsBody">
+        <span class="news-toggle-label">新聞</span><span class="mono news-count" id="newsCount"></span>
+      </button>
+      <div id="newsBody" class="news-body">
+        <div class="news-head">
+          <h2 class="pane-title">新聞</h2>
+          <div class="news-filters" role="group" aria-label="新聞篩選">
+            <button class="nf active" data-filter="all">全部</button>
+            <button class="nf" data-filter="big">大幅</button>
+          </div>
+        </div>
+        <ul id="newsList" class="news-list" aria-live="polite"></ul>
+        <p class="news-note dim">本看板只顯示市場事件；玩家交易造成的價格變動不列入。</p>
+      </div>
+      <span class="news-collapsed-only"><span class="news-badge mono" id="newsBadge"></span></span>
+    </aside>
+  </main>
+
+  <!-- ═══ 底部持倉列 ═══ -->
+  <section id="positionsBar" aria-label="持倉列表">
+    <span class="pos-bar-title">持倉 <b class="mono" id="posCount">0</b></span>
+    <div id="posList" class="pos-list"></div>
+  </section>
+
+  <!-- ═══ Footer ═══ -->
+  <footer id="footer">
+    FXSIMULATOR 為模擬遊戲：非投資建議、無真實金錢。所有 A 幣為遊戲內虛擬單位。
+    <span class="mono dim" id="footMeta"></span>
+  </footer>
+
+  <!-- 事件橫幅（|jump| ≥ 1.5%） -->
+  <div id="evBanner" class="ev-banner" hidden aria-live="polite">
+    <span class="ev-dir" id="evBannerDir"></span>
+    <b id="evBannerHead"></b>
+    <span class="mono" id="evBannerJump"></span>
+  </div>
+
+  <!-- Toast 堆疊 -->
+  <div id="toasts" aria-live="polite"></div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
 </html>

@@ -3,8 +3,7 @@
 依 `FXSimulator-Spec.md` **v0.25** 實作：
 
 - **M1 里程碑**：A/B 合成標的（CFD）的市場引擎、逐倉帳戶、強平與持倉費、SQLite 持久化、CLI 情境驗證。
-- **M2 里程碑**（本次新增）：Fastify HTTP API、WebSocket 即時協定、每秒 tick 迴圈、靜態頁骨架。
-  前端正式介面由前端工作流提供，`public/index.html` 目前只是佔位頁。
+- **M2 里程碑**：Fastify HTTP API、WebSocket 即時協定、每秒 tick 迴圈，以及 **桌機交易頁**（走勢圖、下單面板、持倉、新聞看板；無建置步驟、無 CDN）。
 
 - 純 ESM JavaScript（Node 20+），**無 TypeScript、無建置步驟**
 - 唯一原生相依套件：`better-sqlite3`（以動態 `import()` 載入，純邏輯測試可在原生模組缺席時執行）；
@@ -44,9 +43,17 @@ npm 11.16+ 另有安裝腳本白名單機制，套件已於 `package.json` 的 `
 | `src/server.js` | **M2**：Fastify app（websocket + 靜態檔）、listen、優雅關機 |
 | `src/scenarios.js` | §10 驗收情境（roundtrip / pump / liquidation / gap / opposing） |
 | `src/cli.js` | CLI：`init` `status` `tick` `open` `close` `candles` `events` `scenario` `reset` |
-| `public/index.html` | **M2**：佔位頁（正式介面由前端工作流提供） |
+| `public/` | **M2**：桌機交易頁（`index.html`、`styles.css`、`js/`；含 `?mock=1` 模擬模式） |
 | `test/api.test.js` | **M2**：REST + WebSocket 驗收（`fastify.inject` ＋ `ws`） |
 
+
+## 前端（M2 桌機）
+
+- `npm start` 後開 `http://127.0.0.1:2641/`（nginx 上為 `https://morowin.win/FXSimulator/`）。
+- `?mock=1`：不連伺服器，用內建模擬資料預覽 UI（方便截圖與設計檢查）。
+- `?user=1`：M2 臨時使用者；M3 換成 Google session。
+- 檔案：`public/index.html`、`public/styles.css`、`public/js/{app,chart,order,positions,news,state,ws,mock,util}.js`。
+- 無 CDN、無建置步驟；Canvas 2D；`prefers-reduced-motion` 與鍵盤 focus 已處理。
 
 ## CLI
 
@@ -269,7 +276,7 @@ npm test
 ## 尚未包含（M3 範圍）
 
 - Google 登入與 session（§6.1，M2 為臨時 `?user=` 認證）
-- 正式前端介面（§7；`public/index.html` 目前只是佔位頁）
+- 手機版（§7.3；M2 只做桌機）
 - 離線自動規則引擎與離線報告（§6.3、§6.4）
 - 條件開倉規則、平倉後自動再下單（§7.5）
 - 裝飾、排行榜、破產重整（post-alpha）
