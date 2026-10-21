@@ -1,0 +1,10 @@
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+data/
+fxsim.db
+fxsim.db-wal
+fxsim.db-shm
+.DS_Store
+npm-debug.log*

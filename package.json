@@ -1,0 +1,20 @@
+{
+  "name": "fxsim-m1",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FXSimulator M1 - market engine + account + CLI simulation (no frontend)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "cli": "node src/cli.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11"
+  },
+  "allowScripts": {
+    "better-sqlite3": true
+  }
+}
