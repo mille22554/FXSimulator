@@ -10,9 +10,8 @@
  */
 
 import {
-  FEE_LONG_ANNUAL,
-  FEE_SHORT_ANNUAL,
-  HOURS_PER_YEAR,
+  FEE_LONG_RATE_NUM,
+  FEE_SHORT_RATE_NUM,
   LEVERAGE_OPTIONS,
   MARGIN_STEP_A,
   MAINTENANCE_MARGIN_RATE,
@@ -27,7 +26,7 @@ import {
   SPREAD_HALF,
   INCOME_MILLI_PER_TICK,
 } from './config.js';
-import { aToMilli, floorWithRemainder, priceToE4, roundHalfUp } from './money.js';
+import { aToMilli, chargeFromMicro, hourlyFeeMicro, priceToE4, roundHalfUp } from './money.js';
 
 /** §7.5：minMargin(lev) = ceil(10,000 / lev / 10) × 10 */
 export function minMarginForLeverage(leverage) {
@@ -55,7 +54,7 @@ export class Position {
     liqPriceE4,
     slPriceE4 = null,
     tpPriceE4 = null,
-    feeRemainderMilli = 0,
+    feeRemainderMicro = 0,
     status = 'open',
     openedAt = 0,
     closedAt = null,
@@ -72,7 +71,7 @@ export class Position {
     this.liqPriceE4 = liqPriceE4;
     this.slPriceE4 = slPriceE4;
     this.tpPriceE4 = tpPriceE4;
-    this.feeRemainderMilli = feeRemainderMilli;
+    this.feeRemainderMicro = feeRemainderMicro; // §5.5：費用找零（微 A，整數）
     this.status = status; // 'open' | 'closed' | 'liquidated'
     this.openedAt = openedAt;
     this.closedAt = closedAt;
@@ -381,22 +380,29 @@ export class Account {
 
   // ------------------------------------------------------------ 持倉費
   /**
-   * 整點結算（§5.5）：費 = 名目 × 年利率 ÷ 8760，floor + 餘數累積。
+   * 整點結算（§5.5 v0.25）：費率以微 A 計算、扣款回毫 A、找零以微 A 累積。
+   *   fee_micro            = floor(notional_milli × rate_num ÷ 8760)
+   *   fee_milli            = floor((fee_micro + fee_remainder_micro) ÷ 1000)
+   *   fee_remainder_micro  = (fee_micro + fee_remainder_micro) % 1000
    * @returns {number} 本次總費用（milli-A）
    */
   chargeHourlyFees(tickCount) {
     let total = 0;
     for (const position of this.openPositions()) {
-      const rate = position.isLong ? FEE_LONG_ANNUAL : FEE_SHORT_ANNUAL;
-      const exact = (position.notionalMilli * rate) / HOURS_PER_YEAR;
-      const { charge, remainder } = floorWithRemainder(exact, position.feeRemainderMilli);
-      position.feeRemainderMilli = remainder;
-      if (charge > 0) {
-        this.balanceMilli -= charge;
-        total += charge;
-        this.#ledger(-charge, 'fee', tickCount);
-        this.#notifyPosition(position);
+      const rateNum = position.isLong ? FEE_LONG_RATE_NUM : FEE_SHORT_RATE_NUM;
+      const feeMicro = hourlyFeeMicro(position.notionalMilli, rateNum);
+      const { chargeMilli, remainderMicro } = chargeFromMicro(
+        feeMicro,
+        position.feeRemainderMicro,
+      );
+      position.feeRemainderMicro = remainderMicro;
+      if (chargeMilli > 0) {
+        this.balanceMilli -= chargeMilli;
+        total += chargeMilli;
+        this.#ledger(-chargeMilli, 'fee', tickCount);
       }
+      // 即使本次扣款為 0，找零仍需寫回（否則找零會遺失）
+      this.#notifyPosition(position);
     }
     return total;
   }

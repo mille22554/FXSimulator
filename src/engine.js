@@ -35,24 +35,28 @@ import { priceToE4 } from './money.js';
 
 const SETTLE_EVERY_TICKS = TICKS_PER_MINUTE * 5; // §5.4：每 5 分鐘結算一次
 
+/**
+ * DB row（snake_case 欄位）或記憶體 store 的 Position 物件（camelCase）→ Position。
+ * §6.2 v0.25：經濟時間欄位在 DB 為 tick_id（opened_tick / closed_tick）。
+ */
 function rowToPosition(row) {
   return new Position({
     id: row.id,
-    userId: row.user_id,
+    userId: row.user_id ?? row.userId,
     side: row.side,
-    notionalMilli: row.notional_milli,
+    notionalMilli: row.notional_milli ?? row.notionalMilli,
     leverage: row.leverage,
-    marginMilli: row.margin_milli,
-    entryPriceE4: row.entry_price_e4,
-    liqPriceE4: row.liq_price_e4,
-    slPriceE4: row.sl_price_e4 ?? null,
-    tpPriceE4: row.tp_price_e4 ?? null,
-    feeRemainderMilli: row.fee_remainder_milli ?? 0,
+    marginMilli: row.margin_milli ?? row.marginMilli,
+    entryPriceE4: row.entry_price_e4 ?? row.entryPriceE4,
+    liqPriceE4: row.liq_price_e4 ?? row.liqPriceE4,
+    slPriceE4: row.sl_price_e4 ?? row.slPriceE4 ?? null,
+    tpPriceE4: row.tp_price_e4 ?? row.tpPriceE4 ?? null,
+    feeRemainderMicro: row.fee_remainder_micro ?? row.feeRemainderMicro ?? 0,
     status: row.status,
-    openedAt: row.opened_at ?? 0,
-    closedAt: row.closed_at ?? null,
-    closePriceE4: row.close_price_e4 ?? null,
-    pnlMilli: row.pnl_milli ?? 0,
+    openedAt: row.opened_tick ?? row.openedAt ?? 0,
+    closedAt: row.closed_tick ?? row.closedAt ?? null,
+    closePriceE4: row.close_price_e4 ?? row.closePriceE4 ?? null,
+    pnlMilli: row.pnl_milli ?? row.pnlMilli ?? 0,
   });
 }
 
@@ -110,14 +114,14 @@ export class Engine {
         user_id: this.userId,
         balance_milli: INITIAL_BALANCE_MILLI,
         settled_tick_id: this.ticksExecuted,
-        last_settled_at: this.ticksExecuted,
+        last_settled_tick: this.ticksExecuted,
         created_at: this.ticksExecuted,
       });
     }
     const acct = this.ensureAccount(this.userId, {
       balanceMilli: found ? (found.balance_milli ?? 0) : INITIAL_BALANCE_MILLI,
     });
-    // 引擎狀態（kv）比 accounts 表新：只有沒從狀態還原時才用 accounts 表的結算點
+    // 引擎狀態（engine_state 表）比 accounts 表新：只有沒從狀態還原時才用 accounts 表的結算點
     if (found && !this._restoredFromState) {
       acct.settledTickId = found.settled_tick_id ?? 0;
     }
@@ -136,7 +140,7 @@ export class Engine {
         user_id: acct.userId,
         balance_milli: acct.balanceMilli,
         settled_tick_id: acct.settledTickId,
-        last_settled_at: acct.settledTickId,
+        last_settled_tick: acct.settledTickId,
         created_at: 0,
       });
     };
@@ -151,7 +155,7 @@ export class Engine {
         user_id: acct.userId,
         balance_milli: acct.balanceMilli,
         settled_tick_id: acct.settledTickId,
-        last_settled_at: acct.settledTickId,
+        last_settled_tick: acct.settledTickId,
         created_at: 0,
       });
     };
@@ -227,7 +231,7 @@ export class Engine {
     return this;
   }
 
-  /** 序列化引擎狀態（存進 kv，供重啟還原） */
+  /** 序列化引擎狀態（存進 engine_state 表，供重啟還原） */
   serializeState() {
     return {
       ticksExecuted: this.ticksExecuted,
@@ -348,7 +352,7 @@ export class Engine {
         user_id: userId,
         balance_milli: acct.balanceMilli,
         settled_tick_id: acct.settledTickId,
-        last_settled_at: acct.settledTickId,
+        last_settled_tick: acct.settledTickId,
         created_at: 0,
       });
     }
@@ -369,7 +373,7 @@ export class Engine {
         user_id: userId,
         balance_milli: acct.balanceMilli,
         settled_tick_id: acct.settledTickId,
-        last_settled_at: acct.settledTickId,
+        last_settled_tick: acct.settledTickId,
         created_at: 0,
       });
     }
@@ -491,7 +495,7 @@ export class Engine {
           user_id: acct.userId,
           balance_milli: acct.balanceMilli,
           settled_tick_id: acct.settledTickId,
-          last_settled_at: acct.settledTickId,
+          last_settled_tick: acct.settledTickId,
           created_at: 0,
         });
       }

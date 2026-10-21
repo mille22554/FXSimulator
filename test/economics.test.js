@@ -1,6 +1,6 @@
 /**
  * 經濟正確性驗收（spec §10「經濟正確性」＋「資料與精度 E」）。
- *   1. 持倉費 0.297 A/小時（10 萬名目），24 小時誤差 < 0.001 A
+ *   1. 持倉費 10 萬名目 24 小時合計 7.123 A（§5.5 v0.25，微 A 計費 + 找零累積）
  *   2. 價格衝擊上限 ±20%
  *   3. 開多 → 立刻平倉，淨損益 < 0
  *   4. 自推自賺：把價格推到上限再平倉，淨損益 < 0
@@ -13,7 +13,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { Engine } from '../src/engine.js';
-import { FEE_LONG_ANNUAL, HOURS_PER_YEAR } from '../src/config.js';
+import { FEE_LONG_RATE_NUM } from '../src/config.js';
+import { chargeFromMicro, hourlyFeeMicro } from '../src/money.js';
 
 function newEngine() {
   const engine = new Engine({ seed: 42 });
@@ -22,7 +23,7 @@ function newEngine() {
   return engine;
 }
 
-test('1. 持倉費：10 萬名目 ≈ 0.297 A/小時，24 小時誤差 < 0.001 A', () => {
+test('1. 持倉費：10 萬名目 24 小時合計 7.123 A（誤差 < 0.001 A，微 A 找零）', () => {
   const engine = newEngine();
   const acct = engine.ensureAccount(1);
 
@@ -30,20 +31,33 @@ test('1. 持倉費：10 萬名目 ≈ 0.297 A/小時，24 小時誤差 < 0.001 A
   assert.ok(open.ok, '開倉失敗');
   assert.equal(open.notionalMilli, 100_000_000, '名目應為 100,000 A');
 
+  // §5.5：fee_micro = floor(notional_milli × rate_num ÷ 8760) = 296,803 微 A / 小時
+  const hourlyMicro = hourlyFeeMicro(open.notionalMilli, FEE_LONG_RATE_NUM);
+  assert.equal(hourlyMicro, 296_803, '每小時費應為 296,803 微 A');
+  const first = chargeFromMicro(hourlyMicro, 0);
+  assert.equal(first.chargeMilli, 296, '第一小時應扣 296 毫 A');
+  assert.equal(first.remainderMicro, 803, '第一小時後找零應為 803 微 A');
+
+  const balanceBefore = acct.balanceMilli;
   let charged = 0;
   for (let h = 0; h < 24; h++) charged += acct.chargeHourlyFees(engine.ticksExecuted);
 
-  const hourlyExact = (open.notionalMilli * FEE_LONG_ANNUAL) / HOURS_PER_YEAR;
-  const dailyExact = hourlyExact * 24;
-  const hourlyA = hourlyExact / 1000;
-
-  assert.ok(Math.abs(hourlyA - 0.297) < 0.001, `每小時 ${hourlyA} A 應接近 0.297 A`);
-  // floor + 餘數累積 → 24 小時總額誤差 < 1 milli-A = 0.001 A
+  // 24 小時合計 = 7,123 milli-A = 7.123 A（誤差 < 0.001 A）
+  assert.equal(charged, 7_123, `24h 費用應為 7,123 milli-A（實際 ${charged}）`);
   assert.ok(
-    Math.abs(charged - dailyExact) < 1,
-    `24h 費用 ${charged / 1000} A 與理論 ${dailyExact / 1000} A 誤差應 < 0.001 A`,
+    Math.abs(charged / 1000 - 7.123) < 0.001,
+    `24h 費用 ${charged / 1000} A 與 7.123 A 誤差應 < 0.001 A`,
   );
   assert.ok(charged > 0);
+
+  // 找零以整數微 A 累積（唯一非毫 A 欄位）
+  const remainder = open.position.feeRemainderMicro;
+  assert.ok(Number.isInteger(remainder), '找零必須是整數微 A');
+  assert.ok(remainder >= 0 && remainder < 1000, `找零應落在 [0, 1000)，實際 ${remainder}`);
+  assert.equal(remainder, 272, '24 小時後找零應為 272 微 A');
+
+  // 扣款自可用餘額扣除
+  assert.equal(acct.balanceMilli, balanceBefore - charged, '餘額應等於扣款前的餘額 − 總費用');
 });
 
 test('2. 價格衝擊上限 ±20%（tanh 飽和）', () => {

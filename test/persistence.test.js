@@ -1,6 +1,7 @@
 /**
- * 持久化 / 連續世界驗收（spec §4.4、§5.4、§10）。
+ * 持久化 / 連續世界驗收（spec §4.4、§5.4、§6.2 v0.25、§10）。
  *   8. 重啟後 tick_id 接續、停機期間不發收入
+ *   8b. schema 欄位名稱符合 v0.25（engine_state / fee_remainder_micro / tick_id…）
  *   9. 60 個 tick → 恰好一根 1 分 K 線，且 OHLC 正確
  */
 
@@ -63,6 +64,73 @@ test('8. 重啟後 tick_id 接續、停機期間不發收入', { skip: !sqliteAv
     store1?.close();
     store2?.close();
     // Windows 上 SQLite 的 WAL 句柄可能尚未釋放，清理失敗不影響測試結果
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    } catch {
+      /* ignore cleanup error */
+    }
+  }
+});
+
+test('8b. schema 欄位名稱符合 spec v0.25（engine_state / 微 A 找零 / tick_id 欄位）', { skip: !sqliteAvailable && 'better-sqlite3 不可用' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fxsim-m1-'));
+  const dbPath = join(dir, 'fxsim.db');
+  let store = null;
+  try {
+    store = await openSqliteStore(dbPath);
+    const db = store.db;
+    const cols = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    const tables = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+      .all()
+      .map((r) => r.name);
+
+    // §6.2 v0.25：引擎狀態改用 engine_state 表（key PK / value_json）
+    assert.ok(tables.includes('engine_state'), '應有 engine_state 表');
+    assert.ok(!tables.includes('kv'), '舊的 kv 表不應存在');
+    assert.deepEqual(cols('engine_state'), ['key', 'value_json']);
+
+    // 費用找零：微 A 整數欄位
+    assert.ok(cols('positions').includes('fee_remainder_micro'), 'positions 應有 fee_remainder_micro');
+    assert.ok(!cols('positions').includes('fee_remainder_milli'), '舊欄位 fee_remainder_milli 應移除');
+
+    // 經濟時間欄位一律 tick_id
+    assert.ok(cols('accounts').includes('last_settled_tick'));
+    assert.ok(!cols('accounts').includes('last_settled_at'));
+    assert.ok(cols('positions').includes('opened_tick') && cols('positions').includes('closed_tick'));
+    assert.ok(cols('trades').includes('tick_id') && !cols('trades').includes('ts'));
+    assert.ok(cols('rules').includes('created_tick') && cols('rules').includes('triggered_tick'));
+    assert.ok(cols('events').includes('tick_id') && !cols('events').includes('ts'));
+    assert.ok(cols('ledger').includes('tick_id') && !cols('ledger').includes('ts'));
+
+    // candles_1m.started_at（ISO，M1 留 NULL）；users.created_at 維持 ISO
+    assert.ok(cols('candles_1m').includes('started_at'));
+    assert.ok(cols('users').includes('created_at'));
+
+    // 端到端：開倉 → 整點扣費 → 找零以微 A 寫回
+    const engine = new Engine({ seed: 42, store });
+    engine.load();
+    engine.init();
+    const open = engine.open(1, { side: 'long', marginA: 10_000, leverage: 10 });
+    assert.ok(open.ok, '開倉失敗');
+    const acct = engine.ensureAccount(1);
+    acct.chargeHourlyFees(engine.ticksExecuted);
+
+    const posRow = db
+      .prepare('SELECT fee_remainder_micro, opened_tick, closed_tick FROM positions WHERE id = ?')
+      .get(open.position.id);
+    assert.equal(posRow.fee_remainder_micro, 803, '找零應為 803 微 A');
+    assert.equal(posRow.opened_tick, engine.ticksExecuted, 'opened_tick 應存 tick');
+    assert.equal(posRow.closed_tick, null);
+
+    // 引擎狀態寫進 engine_state（JSON 可解析）
+    engine.persist();
+    const stateRow = db.prepare('SELECT key, value_json FROM engine_state').get();
+    assert.equal(stateRow.key, 'engine_state');
+    const state = JSON.parse(stateRow.value_json);
+    assert.equal(state.ticksExecuted, engine.ticksExecuted);
+  } finally {
+    store?.close();
     try {
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     } catch {

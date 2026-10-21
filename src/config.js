@@ -10,6 +10,7 @@
 
 // ---------------------------------------------------------------- 基本單位
 export const MILLI_PER_A = 1000;
+export const MICRO_PER_A = 1_000_000; // 微 A（1 A = 1,000,000）——唯一非毫 A 的金額刻度
 export const E4 = 10000; // 價格刻度：5.0000 → 50000
 
 // ---------------------------------------------------------------- 標的 / 價格
@@ -43,6 +44,10 @@ export const MAINTENANCE_MARGIN_RATE = 0.002; // 維持保證金 = 名目 × 0.2
 // ---------------------------------------------------------------- 持倉費（§5.5）
 export const FEE_LONG_ANNUAL = 0.026; // 做多 2.6% / 年
 export const FEE_SHORT_ANNUAL = 0.009; // 做空 0.9% / 年
+// §5.5 v0.25：整點費率以 rate_num（年利率 × 1000）參與整數運算
+//   fee_micro = floor(notional_milli × rate_num ÷ 8760)（微 A）
+export const FEE_LONG_RATE_NUM = 26; // 做多 26（= 2.6%）
+export const FEE_SHORT_RATE_NUM = 9; // 做空 9（= 0.9%）
 
 // ---------------------------------------------------------------- 停損停利（§5.1 / §7.5）
 export const MIN_SL_DISTANCE = 0.0005; // 最小停損距離 0.05%
@@ -120,6 +125,7 @@ export const HEADLINES = {
 
 export const CONFIG = Object.freeze({
   MILLI_PER_A,
+  MICRO_PER_A,
   E4,
   SYMBOL,
   BASE_PRICE,
@@ -142,6 +148,8 @@ export const CONFIG = Object.freeze({
   MAINTENANCE_MARGIN_RATE,
   FEE_LONG_ANNUAL,
   FEE_SHORT_ANNUAL,
+  FEE_LONG_RATE_NUM,
+  FEE_SHORT_RATE_NUM,
   MIN_SL_DISTANCE,
   SL_MAX_LIQ_FACTOR,
   IMPACT_K,

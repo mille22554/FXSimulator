@@ -1,13 +1,15 @@
 /**
- * 資料層（spec §6.2）。
+ * 資料層（spec §6.2，v0.25）。
  *
- * - 8 張表完全依 §6.2 的欄位定義。
- * - 額外加一張 `kv`（引擎狀態）供 §4.4 的「重啟後恢復 tick_id / 市場狀態」使用；
- *   §6.2 沒有可放引擎狀態的地方，這是 M1 的最小擴充（已於 README 說明）。
+ * - 9 張表完全依 §6.2 的欄位定義（含 v0.25 新增的 `engine_state`）。
+ * - `engine_state(key, value_json)` 供 §4.4 的「重啟後恢復 tick_id / 市場狀態」使用，
+ *   存放 μ、x、各事件 T_i 與 RNG 狀態（重啟原樣載回，不對 API 輸出）。
  * - `better-sqlite3` 以動態 import 載入，純邏輯測試在原生模組安裝失敗時仍可執行。
  *
- * 時間欄位（ts / created_at / opened_at / closed_at / last_settled_at）一律存 tick_id：
- * 經濟邏輯不得依賴 wall clock（§5.4）。
+ * 時間欄位（tick_id / created_tick / triggered_tick / opened_tick / closed_tick /
+ * last_settled_tick）一律存 tick_id：經濟邏輯不得依賴 wall clock（§5.4）。
+ * 唯一例外：`users.created_at` 是 ISO 真實時間；`candles_1m.started_at` 另存 ISO
+ * （M1 先留 NULL，僅供前端時間軸）。
  */
 
 import { MILLI_PER_A } from './config.js';
@@ -26,30 +28,30 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS accounts (
-  user_id         INTEGER PRIMARY KEY,
-  balance_milli   INTEGER NOT NULL DEFAULT 0,
-  settled_tick_id INTEGER NOT NULL DEFAULT 0,
-  last_settled_at INTEGER NOT NULL DEFAULT 0,
-  created_at      INTEGER NOT NULL DEFAULT 0
+  user_id           INTEGER PRIMARY KEY,
+  balance_milli     INTEGER NOT NULL DEFAULT 0,
+  settled_tick_id   INTEGER NOT NULL DEFAULT 0,
+  last_settled_tick INTEGER NOT NULL DEFAULT 0,
+  created_at        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS positions (
-  id                 INTEGER PRIMARY KEY,
-  user_id            INTEGER NOT NULL,
-  side               TEXT NOT NULL,
-  notional_milli     INTEGER NOT NULL,
-  leverage           INTEGER NOT NULL,
-  entry_price_e4     INTEGER NOT NULL,
-  margin_milli       INTEGER NOT NULL,
-  liq_price_e4       INTEGER NOT NULL,
-  sl_price_e4        INTEGER,
-  tp_price_e4        INTEGER,
-  fee_remainder_milli REAL NOT NULL DEFAULT 0,
-  status             TEXT NOT NULL DEFAULT 'open',
-  opened_at          INTEGER NOT NULL DEFAULT 0,
-  closed_at          INTEGER,
-  close_price_e4     INTEGER,
-  pnl_milli          INTEGER NOT NULL DEFAULT 0
+  id                   INTEGER PRIMARY KEY,
+  user_id              INTEGER NOT NULL,
+  side                 TEXT NOT NULL,
+  notional_milli       INTEGER NOT NULL,
+  leverage             INTEGER NOT NULL,
+  entry_price_e4       INTEGER NOT NULL,
+  margin_milli         INTEGER NOT NULL,
+  liq_price_e4         INTEGER NOT NULL,
+  sl_price_e4          INTEGER,
+  tp_price_e4          INTEGER,
+  fee_remainder_micro  INTEGER NOT NULL DEFAULT 0,
+  status               TEXT NOT NULL DEFAULT 'open',
+  opened_tick          INTEGER NOT NULL DEFAULT 0,
+  closed_tick          INTEGER,
+  close_price_e4       INTEGER,
+  pnl_milli            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS trades (
@@ -60,22 +62,22 @@ CREATE TABLE IF NOT EXISTS trades (
   price_e4      INTEGER NOT NULL,
   notional_milli INTEGER NOT NULL,
   fee_milli     INTEGER NOT NULL DEFAULT 0,
-  ts            INTEGER NOT NULL DEFAULT 0
+  tick_id       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS rules (
-  id          INTEGER PRIMARY KEY,
-  user_id     INTEGER NOT NULL,
-  kind        TEXT NOT NULL,
-  params_json TEXT NOT NULL DEFAULT '{}',
-  enabled     INTEGER NOT NULL DEFAULT 1,
-  created_at  INTEGER NOT NULL DEFAULT 0,
-  triggered_at INTEGER
+  id            INTEGER PRIMARY KEY,
+  user_id       INTEGER NOT NULL,
+  kind          TEXT NOT NULL,
+  params_json   TEXT NOT NULL DEFAULT '{}',
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  created_tick  INTEGER NOT NULL DEFAULT 0,
+  triggered_tick INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS events (
   id                INTEGER PRIMARY KEY,
-  ts                INTEGER NOT NULL DEFAULT 0,
+  tick_id           INTEGER NOT NULL DEFAULT 0,
   headline          TEXT NOT NULL DEFAULT '',
   impact_jump       REAL NOT NULL DEFAULT 0,
   type              TEXT NOT NULL,
@@ -85,6 +87,7 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE TABLE IF NOT EXISTS candles_1m (
   minute_id             INTEGER PRIMARY KEY,
+  started_at            TEXT,
   open_e4               INTEGER NOT NULL,
   high_e4               INTEGER NOT NULL,
   low_e4                INTEGER NOT NULL,
@@ -100,17 +103,17 @@ CREATE TABLE IF NOT EXISTS ledger (
   user_id     INTEGER NOT NULL,
   delta_milli INTEGER NOT NULL,
   reason      TEXT NOT NULL,
-  ts          INTEGER NOT NULL DEFAULT 0
+  tick_id     INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS kv (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS engine_state (
+  key        TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status);
-CREATE INDEX IF NOT EXISTS idx_trades_user_ts       ON trades(user_id, ts);
-CREATE INDEX IF NOT EXISTS idx_ledger_user_ts       ON ledger(user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_trades_user_tick_id  ON trades(user_id, tick_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_user_tick_id  ON ledger(user_id, tick_id);
 `;
 
 // ---------------------------------------------------------------------------
@@ -206,37 +209,37 @@ class SqliteStore {
            role=excluded.role`,
       ),
       upsertAccount: db.prepare(
-        `INSERT INTO accounts (user_id, balance_milli, settled_tick_id, last_settled_at, created_at)
-         VALUES (@user_id, @balance_milli, @settled_tick_id, @last_settled_at, @created_at)
+        `INSERT INTO accounts (user_id, balance_milli, settled_tick_id, last_settled_tick, created_at)
+         VALUES (@user_id, @balance_milli, @settled_tick_id, @last_settled_tick, @created_at)
          ON CONFLICT(user_id) DO UPDATE SET
            balance_milli=excluded.balance_milli, settled_tick_id=excluded.settled_tick_id,
-           last_settled_at=excluded.last_settled_at`,
+           last_settled_tick=excluded.last_settled_tick`,
       ),
       insertPosition: db.prepare(
         `INSERT INTO positions (id, user_id, side, notional_milli, leverage, entry_price_e4, margin_milli,
-                                liq_price_e4, sl_price_e4, tp_price_e4, fee_remainder_milli, status,
-                                opened_at, closed_at, close_price_e4, pnl_milli)
+                                liq_price_e4, sl_price_e4, tp_price_e4, fee_remainder_micro, status,
+                                opened_tick, closed_tick, close_price_e4, pnl_milli)
          VALUES (@id, @user_id, @side, @notional_milli, @leverage, @entry_price_e4, @margin_milli,
-                 @liq_price_e4, @sl_price_e4, @tp_price_e4, @fee_remainder_milli, @status,
-                 @opened_at, @closed_at, @close_price_e4, @pnl_milli)`,
+                 @liq_price_e4, @sl_price_e4, @tp_price_e4, @fee_remainder_micro, @status,
+                 @opened_tick, @closed_tick, @close_price_e4, @pnl_milli)`,
       ),
       updatePosition: db.prepare(
-        `UPDATE positions SET fee_remainder_milli=@fee_remainder_milli, status=@status,
-           closed_at=@closed_at, close_price_e4=@close_price_e4, pnl_milli=@pnl_milli
+        `UPDATE positions SET fee_remainder_micro=@fee_remainder_micro, status=@status,
+           closed_tick=@closed_tick, close_price_e4=@close_price_e4, pnl_milli=@pnl_milli
          WHERE id=@id`,
       ),
       insertTrade: db.prepare(
-        `INSERT INTO trades (id, user_id, position_id, kind, price_e4, notional_milli, fee_milli, ts)
-         VALUES (@id, @user_id, @position_id, @kind, @price_e4, @notional_milli, @fee_milli, @ts)`,
+        `INSERT INTO trades (id, user_id, position_id, kind, price_e4, notional_milli, fee_milli, tick_id)
+         VALUES (@id, @user_id, @position_id, @kind, @price_e4, @notional_milli, @fee_milli, @tick_id)`,
       ),
       insertEvent: db.prepare(
-        `INSERT INTO events (id, ts, headline, impact_jump, type, permanent_share, decay_half_life)
-         VALUES (@id, @ts, @headline, @impact_jump, @type, @permanent_share, @decay_half_life)`,
+        `INSERT INTO events (id, tick_id, headline, impact_jump, type, permanent_share, decay_half_life)
+         VALUES (@id, @tick_id, @headline, @impact_jump, @type, @permanent_share, @decay_half_life)`,
       ),
       insertCandle: db.prepare(
-        `INSERT INTO candles_1m (minute_id, open_e4, high_e4, low_e4, close_e4, base_close_e4,
+        `INSERT INTO candles_1m (minute_id, started_at, open_e4, high_e4, low_e4, close_e4, base_close_e4,
                                  net_notional_milli, volume_notional_milli, supply_a_milli)
-         VALUES (@minute_id, @open_e4, @high_e4, @low_e4, @close_e4, @base_close_e4,
+         VALUES (@minute_id, @started_at, @open_e4, @high_e4, @low_e4, @close_e4, @base_close_e4,
                  @net_notional_milli, @volume_notional_milli, @supply_a_milli)
          ON CONFLICT(minute_id) DO UPDATE SET
            open_e4=excluded.open_e4, high_e4=excluded.high_e4, low_e4=excluded.low_e4,
@@ -246,14 +249,14 @@ class SqliteStore {
            supply_a_milli=excluded.supply_a_milli`,
       ),
       insertLedger: db.prepare(
-        `INSERT INTO ledger (id, user_id, delta_milli, reason, ts)
-         VALUES (@id, @user_id, @delta_milli, @reason, @ts)`,
+        `INSERT INTO ledger (id, user_id, delta_milli, reason, tick_id)
+         VALUES (@id, @user_id, @delta_milli, @reason, @tick_id)`,
       ),
-      upsertKv: db.prepare(
-        `INSERT INTO kv (key, value) VALUES (@key, @value)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      upsertEngineState: db.prepare(
+        `INSERT INTO engine_state (key, value_json) VALUES (@key, @value_json)
+         ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json`,
       ),
-      getKv: db.prepare(`SELECT value FROM kv WHERE key = ?`),
+      getEngineState: db.prepare(`SELECT value_json FROM engine_state WHERE key = ?`),
       lastCandle: db.prepare(`SELECT * FROM candles_1m ORDER BY minute_id DESC LIMIT 1`),
       candles: db.prepare(`SELECT * FROM candles_1m ORDER BY minute_id DESC LIMIT ?`),
       events: db.prepare(`SELECT * FROM events ORDER BY id DESC LIMIT ?`),
@@ -279,17 +282,18 @@ class SqliteStore {
   }
 
   saveEngineState(state) {
-    this.stmt.upsertKv.run({ key: 'engine_state', value: JSON.stringify(state) });
+    this.stmt.upsertEngineState.run({ key: 'engine_state', value_json: JSON.stringify(state) });
   }
 
   loadEngineState() {
-    const row = this.stmt.getKv.get('engine_state');
-    return row ? JSON.parse(row.value) : null;
+    const row = this.stmt.getEngineState.get('engine_state');
+    return row ? JSON.parse(row.value_json) : null;
   }
 
   saveCandle(c) {
     this.stmt.insertCandle.run({
       minute_id: c.minute_id,
+      started_at: c.started_at ?? null, // §6.2：ISO 時間軸（M1 尚未實作 → NULL）
       open_e4: c.open_e4,
       high_e4: c.high_e4,
       low_e4: c.low_e4,
@@ -312,7 +316,7 @@ class SqliteStore {
   saveEvent(e) {
     this.stmt.insertEvent.run({
       id: e.id,
-      ts: e.ts ?? 0,
+      tick_id: e.ts ?? 0,
       headline: e.headline ?? '',
       impact_jump: e.pct ?? 0,
       type: e.type,
@@ -322,7 +326,8 @@ class SqliteStore {
   }
 
   loadEvents(limit = 100) {
-    return this.stmt.events.all(limit).reverse();
+    // JS 層維持 `ts` 欄位（DB 欄位為 tick_id）
+    return this.stmt.events.all(limit).reverse().map((r) => ({ ...r, ts: r.tick_id }));
   }
 
   saveTrade(t) {
@@ -334,12 +339,12 @@ class SqliteStore {
       price_e4: t.priceE4,
       notional_milli: t.notionalMilli,
       fee_milli: t.feeMilli ?? 0,
-      ts: t.ts ?? 0,
+      tick_id: t.ts ?? 0,
     });
   }
 
   loadTrades(limit = 100) {
-    return this.stmt.trades.all(limit).reverse();
+    return this.stmt.trades.all(limit).reverse().map((r) => ({ ...r, ts: r.tick_id }));
   }
 
   savePosition(p) {
@@ -354,10 +359,10 @@ class SqliteStore {
       liq_price_e4: p.liqPriceE4,
       sl_price_e4: p.slPriceE4 ?? null,
       tp_price_e4: p.tpPriceE4 ?? null,
-      fee_remainder_milli: p.feeRemainderMilli ?? 0,
+      fee_remainder_micro: p.feeRemainderMicro ?? 0,
       status: p.status,
-      opened_at: p.openedAt ?? 0,
-      closed_at: p.closedAt ?? null,
+      opened_tick: p.openedAt ?? 0,
+      closed_tick: p.closedAt ?? null,
       close_price_e4: p.closePriceE4 ?? null,
       pnl_milli: p.pnlMilli ?? 0,
     });
@@ -366,9 +371,9 @@ class SqliteStore {
   updatePosition(p) {
     this.stmt.updatePosition.run({
       id: p.id,
-      fee_remainder_milli: p.feeRemainderMilli ?? 0,
+      fee_remainder_micro: p.feeRemainderMicro ?? 0,
       status: p.status,
-      closed_at: p.closedAt ?? null,
+      closed_tick: p.closedAt ?? null,
       close_price_e4: p.closePriceE4 ?? null,
       pnl_milli: p.pnlMilli ?? 0,
     });
@@ -384,7 +389,7 @@ class SqliteStore {
       user_id: a.user_id ?? a.userId,
       balance_milli: a.balance_milli ?? a.balanceMilli,
       settled_tick_id: a.settled_tick_id ?? a.settledTickId,
-      last_settled_at: a.last_settled_at ?? a.settledTickId,
+      last_settled_tick: a.last_settled_tick ?? a.settledTickId,
       created_at: a.created_at ?? 0,
     });
   }
@@ -417,12 +422,12 @@ class SqliteStore {
       user_id: l.userId,
       delta_milli: l.deltaMilli,
       reason: l.reason,
-      ts: l.ts ?? 0,
+      tick_id: l.ts ?? 0,
     });
   }
 
   loadLedger(limit = 100) {
-    return this.stmt.ledger.all(limit).reverse();
+    return this.stmt.ledger.all(limit).reverse().map((r) => ({ ...r, ts: r.tick_id }));
   }
 }
 

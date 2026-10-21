@@ -1,6 +1,6 @@
 # FXSimulator — M1（市場引擎 + 帳戶 + CLI）
 
-依 `FXSimulator-Spec.md` v0.23 實作的 **M1 里程碑**：A/B 合成標的（CFD）的市場引擎、逐倉帳戶、
+依 `FXSimulator-Spec.md` **v0.25** 實作的 **M1 里程碑**：A/B 合成標的（CFD）的市場引擎、逐倉帳戶、
 強平與持倉費、SQLite 持久化、CLI 情境驗證。**沒有前端**（前端是 M2）。
 
 - 純 ESM JavaScript（Node 20+），**無 TypeScript、無建置步驟**
@@ -28,7 +28,7 @@ npm 11.16+ 另有安裝腳本白名單機制，套件已於 `package.json` 的 `
 |------|------|
 | `src/config.js` | 全部常數（經濟參數、事件參數、表格規格） |
 | `src/rng.js` | mulberry32 seeded RNG：均勻 / 常態（Box-Muller）/ 指數 |
-| `src/money.js` | milli-A、e4 價格換算、費用 floor+餘數累積、P&L 四捨五入 |
+| `src/money.js` | milli-A / 微 A、e4 價格換算、持倉費微 A 計算（`hourlyFeeMicro` / `chargeFromMicro`）、P&L 四捨五入 |
 | `src/market.js` | 價格引擎：OU + 事件三層 + 玩家衝擊 + 流動性深度 L |
 | `src/account.js` | 帳戶：收入、開平倉、衝擊成交價、強平、停損停利、持倉費 |
 | `src/db.js` | §6.2 schema（WAL）、記憶體 store 與 SQLite store、save/load |
@@ -91,42 +91,56 @@ P      = P_base × (1 + 0.2 × tanh(N / L))
 - 保證金 = 名目 ÷ 槓桿；維持保證金 = 名目 × 0.2%；強平距離 = 1/槓桿 − 0.2%
 - 強平：浮虧 ≥ 保證金 − 維持保證金；**先收集全部觸發、再依序平倉並重算價格**
 - 超額損失由可用餘額吸收，餘額可為負；欠款期間不能開新倉
-- 持倉費：多 2.6%/年、空 0.9%/年，`floor(名目_milli × 年利率 ÷ 8760)` + **每部位餘數累積**，
-  整點（`tick_count % 3600 === 0`）結算
+- 持倉費（§5.5 v0.25）：多 2.6%/年（`rate_num = 26`）、空 0.9%/年（`rate_num = 9`），
+  `fee_micro = floor(名目_milli × rate_num ÷ 8760)`（微 A），
+  `fee_milli = floor((fee_micro + fee_remainder_micro) ÷ 1000)`，
+  找零 `fee_remainder_micro = (fee_micro + fee_remainder_micro) % 1000`（**微 A**、整數），
+  整點（`tick_count % 3600 === 0`）結算；10 萬名目做多 24 小時合計 **7.123 A**
 - 最小名目 10,000 A；保證金級距 10 A；同時持倉上限 5 張
 - 名目上限 `min(2L, 可用餘額 × 槓桿)`，單人總名目上限 `4L`
 
-### 資料（§6.2）
+### 資料（§6.2，v0.25）
 
-`users` / `accounts` / `positions` / `trades` / `rules` / `events` / `candles_1m` / `ledger`
-欄位完全依規格；索引 `positions(user_id,status)`、`trades(user_id,ts)`、`ledger(user_id,ts)`。
-金額為整數 milli-A、價格為整數 e4；**所有時間欄位存 `tick_id`**（不用 wall clock）。
+`users` / `accounts` / `positions` / `trades` / `rules` / `events` / `candles_1m` / `ledger` / `engine_state`
+欄位完全依規格 v0.25；索引 `positions(user_id,status)`、`trades(user_id,tick_id)`、`ledger(user_id,tick_id)`。
+金額為整數 milli-A、價格為整數 e4；**所有經濟時間欄位存 `tick_id`**（不用 wall clock）：
+
+| 表 | 時間欄位 |
+|----|---------|
+| `users` | `created_at` = ISO 真實時間（M1 尚未寫 ISO，暫存 tick；M2 登入時補齊） |
+| `accounts` | `settled_tick_id`、`last_settled_tick`、`created_at` |
+| `positions` | `opened_tick`、`closed_tick` |
+| `trades` / `events` / `ledger` | `tick_id` |
+| `rules` | `created_tick`、`triggered_tick` |
+| `candles_1m` | `started_at` = ISO（僅供前端時間軸；M1 先留 NULL） |
+
+唯一的非毫 A 金額欄位是 `positions.fee_remainder_micro`（**微 A**，1 A = 1,000,000）——只存不足 1 毫 A
+的持倉費找零，永不直接當餘額或損益。`engine_state(key, value_json)` 存 μ、x、各事件 T_i 與 RNG 狀態，
+重啟原樣載回、不對 API 輸出。
 
 ---
 
 ## 實作選擇（規格未明處的預設值）
 
-1. **`kv` 額外表**：§6.2 沒有可放「引擎狀態」的地方，但 §4.4/§5.4 要求重啟後還原
-   `tick_id`、價格錨、OU 分量與事件暫態。因此額外加一張 `kv(key, value)`（JSON）存放
-   引擎狀態；若從 `candles_1m` 最後一根還原則退化成 `(minute_id + 1) × 60` ticks。
-2. **`balance_milli` 語意**：= 現金餘額（可用餘額）。開倉即扣保證金，平倉時
+1. **`balance_milli` 語意**：= 現金餘額（可用餘額）。開倉即扣保證金，平倉時
    `現金 += 保證金 + 損益` → 等價於「餘額變化 = 實際損益」。權益 = 現金 + 在場保證金。
-3. **分鐘切分**：`minute_id = ⌊(tick_count − 1) / 60⌋`，每 60 ticks 收線並寫一根
+2. **分鐘切分**：`minute_id = ⌊(tick_count − 1) / 60⌋`，每 60 ticks 收線並寫一根
    `candles_1m`；`tick_id // 60` 與之相差至多一根，客戶端對齊時以伺服器 tick 為準（§7.6）。
-4. **收入結算頻率**：規格寫「每 5 分鐘」，實作在**每 5 分鐘**（300 ticks）或**每次交易**時
+3. **收入結算頻率**：規格寫「每 5 分鐘」，實作在**每 5 分鐘**（300 ticks）或**每次交易**時
    把 accrued 寫回 `accounts`；引擎狀態每分鐘存一次（較 `accounts` 表新，重啟以它為準）。
-5. **四捨五入方向**：`roundHalfUp(x) = floor(x + 0.5)`（朝 +∞；−0.5 → 0）。
+4. **四捨五入方向**：`roundHalfUp(x) = floor(x + 0.5)`（朝 +∞；−0.5 → 0）。
    損益一律由**整數 e4 進場/出場價**推導，因此重複結算不累積誤差。
-6. **持倉費餘數**：餘數以 **REAL** 存 `fee_remainder_milli`（milli-A 的小數部分）。
-   若整數化會讓 24 小時誤差達 0.019 A，超過 §10 的 0.001 A 門檻。
-7. **黏著型機率**：每次重大事件獨立抽 `U(1.5%, 3%)`；黏著時永久比例抽 `U(30%, 70%)`。
-8. **事件文案池**：`config.js` 內建中性財經文案（依類型分池），僅供 `events` 表 `headline` 使用。
-9. **分鐘邊界的成交歸屬**：交易發生在「某分鐘已封存、下一分鐘尚未開盤」的縫隙時
+5. **黏著型機率**：每次重大事件獨立抽 `U(1.5%, 3%)`；黏著時永久比例抽 `U(30%, 70%)`。
+6. **事件文案池**：`config.js` 內建中性財經文案（依類型分池），僅供 `events` 表 `headline` 使用。
+7. **分鐘邊界的成交歸屬**：交易發生在「某分鐘已封存、下一分鐘尚未開盤」的縫隙時
    （例如 tick 恰好是 60 的倍數），該筆成交量會記到**下一根** K 線（價格影響則從下一根
    K 線的 open 開始反映）。避免出現「已封存的 K 線被回頭改寫」與成交量遺失。
-10. **額外產出**：`src/scenarios.js`（規格未要求，但 CLI 的 `scenario` 指令需要）、
-    `Engine.resetAccount()`（情境用）、停損停利觸發（CLI 的 `--sl/--tp` 需要，M1 只做伺服器端觸發，
-    不做 §6.3 的條件開倉規則——那是 M3）。
+8. **額外產出**：`src/scenarios.js`（規格未要求，但 CLI 的 `scenario` 指令需要）、
+   `Engine.resetAccount()`（情境用）、停損停利觸發（CLI 的 `--sl/--tp` 需要，M1 只做伺服器端觸發，
+   不做 §6.3 的條件開倉規則——那是 M3）。
+
+> v0.25 已對齊規格的兩項（原先列於本節，現已移除）：`engine_state` 表取代舊的 `kv` 額外表；
+> `positions.fee_remainder_micro` 改為**整數微 A**，不再用 REAL 存毫 A 小數。
 
 ## 規格衝突與取捨（已知的 spec 內部矛盾）
 
@@ -143,11 +157,11 @@ P      = P_base × (1 + 0.2 × tanh(N / L))
 npm test
 ```
 
-`node --test`（無框架、無 watch）。共 14 個測試（規格要求 10 個 + 4 個補充）：
+`node --test`（無框架、無 watch）。共 15 個測試（規格要求 10 個 + 5 個補充）：
 
 | # | 測試 | 對應規格 |
 |---|------|---------|
-| 1 | 10 萬名目持倉費 ≈ 0.297 A/h，24 小時誤差 < 0.001 A | §10 E |
+| 1 | 10 萬名目持倉費 24 小時合計 **7.123 A**（誤差 < 0.001 A、找零以微 A 累積） | §10 E / §5.5 |
 | 2 | 價格衝擊上限 ±20%（tanh 飽和） | §4.1 |
 | 3 | 開多 → 立刻平倉，淨損益 < 0 | §10 經濟 |
 | 4 | 自推自賺：最大名目推高價格再平倉，淨損益 < 0 | §10 經濟 |
@@ -155,6 +169,7 @@ npm test
 | 6 | 100× 逆向 → 強平，只影響該單 | §10 經濟（見上表 A） |
 | 7 | 4% 跳空 → 餘額為負、欠款期間不能開新倉 | §10 經濟 |
 | 8 | 重啟後 `tick_id` 接續、停機期間不發收入 | §4.4 / §5.4 |
+| 8b | schema 欄位名稱符合 v0.25（`engine_state` / `fee_remainder_micro` / `tick_id`…） | §6.2 |
 | 9 | 60 ticks → 恰好一根 1 分 K，OHLC 正確 | §7.6 / §10 E |
 | 10 | 10,000 次重大事件：黏著 1.5～3%、永久 30～70% | §10 事件模型 |
 | E1 | P&L 四捨五入到毫 A、重複結算不累積誤差 | §10 E |
@@ -162,7 +177,7 @@ npm test
 | 10b | 結構事件 100% 永久、新聞事件無永久比例 | §4.2 |
 | 10c | 同種子重播事件序列可重現 | §4.2 |
 
-測試 8 需要 `better-sqlite3`；若原生模組不可用會自動 **skip**（其餘 13 個仍會跑）。
+測試 8、8b 需要 `better-sqlite3`；若原生模組不可用會自動 **skip**（其餘 13 個仍會跑）。
 
 ## 尚未包含（M2 / M3 範圍）
 
