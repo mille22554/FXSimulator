@@ -3,10 +3,10 @@
 
 import { createMockServer } from './mock.js';
 
-export function createTransport({ mock, userId, onStatus, onMessage }) {
+export function createTransport({ mock, userId, onStatus, onMessage, mockOpts = {} }) {
 
   if (mock) {
-    const server = createMockServer();
+    const server = createMockServer(mockOpts);
     let session;
     return {
       kind: 'mock',
@@ -16,6 +16,8 @@ export function createTransport({ mock, userId, onStatus, onMessage }) {
         await session.ready;
       },
       send(msg) { server.handle(msg, session); },
+      /** mock REST shim：contract REST 端點（rules/report）由模擬伺服器代答 */
+      rest(path, method, body) { return Promise.resolve(server.handleRest(path, method, body)); },
       close() { server.detach(session); },
     };
   }

@@ -7,6 +7,8 @@ import { Chart } from './chart.js';
 import { initOrderPanel, refreshOnTick } from './order.js';
 import { initPositions, renderPositions } from './positions.js';
 import { initNews, renderNews, maybeBanner } from './news.js';
+import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js';
+import { initReport, initReportApi, fetchAndShowReport } from './report.js';
 import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned } from './util.js';
 
 const params = new URLSearchParams(location.search);
@@ -136,6 +138,7 @@ function renderAll() {
   renderPositions();
   renderNews();
   refreshOnTick();
+  rulesOnTick();
   chart.render();
 }
 
@@ -165,6 +168,9 @@ function handleMessage(m) {
       if (fresh) {
         // 初次載入另取完整 candles／events（contract REST）
         loadRestBootstrap(m.data);
+        // M3：條件單清單＋離線報告（mock 走 transport.rest shim；真實走 fetch）
+        loadRules();
+        fetchAndShowReport();
       }
       break;
     }
@@ -210,6 +216,32 @@ function handleMessage(m) {
         maybeBanner(m.data);
         chart.render();
       }
+      break;
+    }
+    /* ── M3：條件單訊息 ── */
+    case 'rule.updated': {
+      applyRuleUpdate(m.data);
+      if (m.request_id) state.pendingOrders.delete(m.request_id);
+      if (m.data && m.data.status === 'cancelled') toast('ok', `條件單 #${m.data.id} 已取消`);
+      break;
+    }
+    case 'rule.triggered': {
+      const d = m.data;
+      const filled = d.fill_price_e4 != null ? fmtPrice(d.fill_price_e4) : '—';
+      toast('ok', `條件單 #${d.rule_id} ${d.side === 'long' ? '買入' : '賣出'}成交 @ ${filled}`);
+      renderAll();
+      break;
+    }
+    case 'rule.skipped': {
+      const d = m.data;
+      const txt = { insufficient_balance: '餘額不足', max_positions: '持倉已滿', debt_no_open: '負債無法開倉' }[d.reason] || d.reason;
+      toast('err', `條件單 #${d.rule_id} 未能成交：${txt}（規則維持生效）`);
+      break;
+    }
+    case 'rule.rejected': {
+      const rreason = m.data && m.data.reason;
+      applyRuleRejected(rreason);
+      toast('err', `條件單被拒：${ruleReasonText(rreason)}`);
       break;
     }
     default: break;
@@ -308,11 +340,16 @@ async function boot() {
   initOrderPanel(onSend);
   initPositions(onClosePosition);
   initNews(() => chart.render());
+  // M3：條件單 + 離線報告
+  initRulesPanel();
+  initReport();
+
   setConn('connecting');
 
   transport = createTransport({
     mock: state.isMock,
     userId: state.userId,
+    mockOpts: { forceReport: params.get('report') === 'liq' ? 'liq' : params.get('report') === '1' ? 'report' : null },
     onStatus: (s, n, w) => {
       // 重連成功 → 下一個 snapshot 以 REST 資料覆蓋重建（規格 §7.6 斷線重連）
       if (s === 'online' && state.connectedOnce) wasReconnect = true;
@@ -320,6 +357,15 @@ async function boot() {
     },
     onMessage: handleMessage,
   });
+
+  // M3：API 層先掛 transport（mock 用 rest shim；真實用 fetch），connect 期間 snapshot 就能取規則
+  initRulesApi(transport);
+  initReportApi(transport);
+  setRulesWsSender((type, data, request_id) => {
+    state.pendingOrders.set(request_id, { type, ruleReq: true });
+    transport.send({ type, request_id, data });
+  });
+
   await transport.connect();
 
   renderAll();

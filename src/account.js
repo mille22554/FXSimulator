@@ -60,6 +60,7 @@ export class Position {
     closedAt = null,
     closePriceE4 = null,
     pnlMilli = 0,
+    ruleId = null,
   }) {
     this.id = id;
     this.userId = userId;
@@ -77,6 +78,7 @@ export class Position {
     this.closedAt = closedAt;
     this.closePriceE4 = closePriceE4;
     this.pnlMilli = pnlMilli;
+    this.ruleId = ruleId; // M3：由哪一條條件開倉規則開出的（null = 玩家手動）
   }
 
   get isLong() {
@@ -112,11 +114,25 @@ export class Position {
 }
 
 export class Account {
-  constructor({ userId, balanceMilli = 0, settledTickId = 0, displayName = null }) {
+  constructor({
+    userId,
+    balanceMilli = 0,
+    settledTickId = 0,
+    displayName = null,
+    lastSeenTick = 0,
+    equityHighMilli = null,
+    equityLowMilli = null,
+    equitySeenMilli = null,
+  }) {
     this.userId = userId;
     this.balanceMilli = balanceMilli;
     this.settledTickId = settledTickId;
     this.displayName = displayName;
+    // M3（§6.4 離線報告）：上次連線的 tick、期間淨值高低點、上次連線當下的淨值
+    this.lastSeenTick = lastSeenTick;
+    this.equityHighMilli = equityHighMilli;
+    this.equityLowMilli = equityLowMilli;
+    this.equitySeenMilli = equitySeenMilli;
     this.positions = new Map();
     this.onTrade = null; // (trade) => void
     this.onLedger = null; // (entry) => void
@@ -157,8 +173,21 @@ export class Account {
    * @param {object} opts
    *   side 'long'|'short'、marginA 保證金(A)、leverage 槓桿、
    *   slPct/tpPct 停損停利（0.005 = 0.5%）、market、tickCount、positionId
+   *   fillPriceE4（M3 條件開倉：已含 0.1% 滑價的成交價；給定時不再疊點差）
+   *   ruleId（M3：觸發這筆開倉的規則 id；null = 玩家手動下單）
    */
-  openPosition({ side, marginA, leverage, slPct = null, tpPct = null, market, tickCount, positionId }) {
+  openPosition({
+    side,
+    marginA,
+    leverage,
+    slPct = null,
+    tpPct = null,
+    market,
+    tickCount,
+    positionId,
+    fillPriceE4 = null,
+    ruleId = null,
+  }) {
     this.settle(tickCount);
 
     if (side !== 'long' && side !== 'short') return { ok: false, reason: 'side_invalid' };
@@ -221,8 +250,16 @@ export class Account {
     const notionalA = notionalMilli / MILLI_PER_A;
     market.addNotional(side === 'long' ? notionalA : -notionalA);
     const mid = market.price;
-    const fill = side === 'long' ? mid * (1 + SPREAD_HALF) : mid * (1 - SPREAD_HALF);
-    const entryPriceE4 = priceToE4(fill);
+    let fill;
+    let entryPriceE4;
+    if (fillPriceE4 != null) {
+      // M3 條件開倉：成交價已由規則引擎算好（含「只在變差時」的 0.1% 滑價）
+      fill = fillPriceE4 / 10000;
+      entryPriceE4 = fillPriceE4;
+    } else {
+      fill = side === 'long' ? mid * (1 + SPREAD_HALF) : mid * (1 - SPREAD_HALF);
+      entryPriceE4 = priceToE4(fill);
+    }
 
     let slPriceE4 = null;
     let tpPriceE4 = null;
@@ -252,8 +289,11 @@ export class Account {
       slPriceE4,
       tpPriceE4,
       openedAt: tickCount,
+      ruleId,
     });
     this.positions.set(position.id, position);
+
+    const source = ruleId != null ? 'rule' : 'system';
 
     this.#trade({
       positionId: position.id,
@@ -263,8 +303,34 @@ export class Account {
       feeMilli: 0,
       ts: tickCount,
     });
-    this.#ledger(-finalMarginMilli, 'margin_hold', tickCount);
+    this.#ledger(-finalMarginMilli, 'margin_hold', tickCount, source);
     this.#notifyPosition(position);
+
+    // M3 §6.3：規則開倉的 SL/TP 以「實際成交價」重算；若成交價已穿過 SL → 立刻平倉
+    if (fillPriceE4 != null && slPriceE4 != null) {
+      const crossed = side === 'long' ? entryPriceE4 <= slPriceE4 : entryPriceE4 >= slPriceE4;
+      if (crossed) {
+        const closed = this.closePosition({
+          positionId: position.id,
+          market,
+          tickCount,
+          reason: 'stop_loss',
+          status: 'closed',
+        });
+        return {
+          ok: true,
+          position: closed.position,
+          entryPriceE4,
+          midPrice: market.price,
+          notionalMilli,
+          marginMilli: finalMarginMilli,
+          truncated,
+          availableMilli: this.balanceMilli,
+          closedImmediately: true,
+          closeResult: closed,
+        };
+      }
+    }
 
     return {
       ok: true,
@@ -317,11 +383,12 @@ export class Account {
       feeMilli: 0,
       ts: tickCount,
     });
-    this.#ledger(position.marginMilli, 'margin_refund', tickCount);
-    this.#ledger(pnlMilli, 'pnl', tickCount);
+    const source = position.ruleId != null ? 'rule' : 'system';
+    this.#ledger(position.marginMilli, 'margin_refund', tickCount, source);
+    this.#ledger(pnlMilli, 'pnl', tickCount, source);
     this.#notifyPosition(position);
 
-    return { ok: true, position, pnlMilli, exitPriceE4, midPrice: mid };
+    return { ok: true, position, pnlMilli, exitPriceE4, midPrice: mid, stopKind: null };
   }
 
   // ------------------------------------------------------------ 強平
@@ -366,7 +433,10 @@ export class Account {
             reason: 'stop_loss',
             status: 'closed',
           });
-          if (r.ok) results.push(r);
+          if (r.ok) {
+            r.stopKind = 'sl';
+            results.push(r);
+          }
           continue;
         }
       }
@@ -381,7 +451,10 @@ export class Account {
             reason: 'take_profit',
             status: 'closed',
           });
-          if (r.ok) results.push(r);
+          if (r.ok) {
+            r.stopKind = 'tp';
+            results.push(r);
+          }
         }
       }
     }
@@ -432,8 +505,8 @@ export class Account {
     }
   }
 
-  #ledger(deltaMilli, reason, ts) {
-    if (this.onLedger) this.onLedger({ userId: this.userId, deltaMilli, reason, ts });
+  #ledger(deltaMilli, reason, ts, source = 'system') {
+    if (this.onLedger) this.onLedger({ userId: this.userId, deltaMilli, reason, ts, source });
   }
 
   #notifyPosition(position) {
@@ -446,6 +519,10 @@ export class Account {
       balanceMilli: this.balanceMilli,
       settledTickId: this.settledTickId,
       displayName: this.displayName,
+      lastSeenTick: this.lastSeenTick,
+      equityHighMilli: this.equityHighMilli,
+      equityLowMilli: this.equityLowMilli,
+      equitySeenMilli: this.equitySeenMilli,
     };
   }
 }

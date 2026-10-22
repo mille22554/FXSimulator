@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=1280">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FXSimulator — 交易</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0d13'/%3E%3Cpath d='M6 20 L12 13 L16 17 L26 6' stroke='%2326d07c' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
@@ -24,6 +24,7 @@
       <div class="stat"><dt>已用保證金</dt><dd class="mono" id="statMargin">—</dd><small>A</small></div>
     </dl>
     <div class="top-right">
+      <button id="rulesBtn" class="rules-btn" type="button" aria-haspopup="dialog">條件單<span class="mono rules-badge" id="rulesCount">0/2</span></button>
       <div class="quote-mini" aria-label="目前價格">
         <span class="sym">A/B</span>
         <b class="mono" id="tickPrice">—</b>
@@ -157,6 +158,83 @@
     <span class="ev-dir" id="evBannerDir"></span>
     <b id="evBannerHead"></b>
     <span class="mono" id="evBannerJump"></span>
+  </div>
+
+  <!-- ═══ 條件單面板（桌機／手機共用） ═══ -->
+  <div id="rulesPanel" class="overlay" hidden>
+    <div class="panel-sheet rules-sheet" role="dialog" aria-modal="true" aria-label="條件單">
+      <header class="sh-head">
+        <h2>條件單</h2><span class="mono sh-limit" id="rulesLimit">0/2</span>
+        <button id="rulesClose" class="sh-close" type="button">關閉</button>
+      </header>
+      <div class="sh-body">
+        <p class="sh-sub dim">價格碰到觸發價即市價進場；成功成交後單次失效。同時最多 2 條生效。</p>
+        <p class="sh-empty dim" id="rulesEmpty" hidden>目前沒有條件單。</p>
+        <ul id="rulesList" class="rules-list"></ul>
+        <button id="ruleNewBtn" class="rs-new" type="button">＋ 新增條件單</button>
+        <form id="ruleForm" class="rule-form" hidden novalidate>
+          <div class="f-group">
+            <span class="f-label">方向</span>
+            <div class="rf-side" role="radiogroup" aria-label="條件單方向">
+              <button type="button" class="rf-side-btn active" data-side="long" aria-checked="true">做多</button>
+              <button type="button" class="rf-side-btn" data-side="short" aria-checked="false">做空</button>
+            </div>
+          </div>
+          <div class="f-group">
+            <label class="f-label" for="ruleTrigger">觸發價</label>
+            <input id="ruleTrigger" type="number" inputmode="decimal" step="0.0001" min="0" required>
+            <p class="f-note" id="ruleTriggerWarn" hidden>緊貼現價（&lt;0.05%），會立刻成交。</p>
+            <p class="rf-hint dim" id="ruleTriggerHint"></p>
+          </div>
+          <div class="f-group">
+            <span class="f-label">槓桿</span>
+            <div class="lev-row" id="ruleLevRow" role="radiogroup" aria-label="條件單槓桿"></div>
+          </div>
+          <div class="f-group">
+            <label class="f-label" for="ruleMargin">保證金（A）</label>
+            <div class="rf-margin-row">
+              <input id="ruleMargin" type="number" inputmode="numeric" step="10" min="0" value="1000">
+              <b class="mono" id="ruleNotional">名目 —</b>
+            </div>
+            <p class="rf-hint dim" id="ruleMarginHint"></p>
+          </div>
+          <div class="f-group rf-sltp">
+            <div class="sltp-col">
+              <label class="f-label" for="ruleSl">停損 %</label>
+              <input id="ruleSl" type="number" step="0.05" min="0" inputmode="decimal" placeholder="不設">
+            </div>
+            <div class="sltp-col">
+              <label class="f-label" for="ruleTp">停利 %</label>
+              <input id="ruleTp" type="number" step="0.05" min="0" inputmode="decimal" placeholder="不設">
+            </div>
+          </div>
+          <p class="f-note rule-form-note" id="ruleFormNote" hidden></p>
+          <div class="rf-actions">
+            <button type="button" id="ruleCancel" class="rs-cancel">取消</button>
+            <button type="submit" id="ruleSubmit" class="rs-commit">建立條件單</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 離線報告（連線時彈出） ═══ -->
+  <div id="reportModal" class="overlay" hidden>
+    <div class="panel-sheet report-sheet" role="dialog" aria-modal="true" aria-label="離線報告">
+      <header class="sh-head">
+        <h2>離線報告</h2><b class="mono" id="rpDuration">—</b>
+        <button id="reportClose" class="sh-close" type="button">關閉</button>
+      </header>
+      <div class="sh-body">
+        <div class="rp-row"><span>離線收益</span><b class="mono" id="rpIncome">—</b></div>
+        <div class="rp-row liq-red" id="rpLiqRow" hidden><span>強平</span><b>離線期間觸發強平，條件單已暫停，需手動恢復</b></div>
+        <div class="rp-row"><span>淨值 起→迄</span><b class="mono"><span id="rpEqStart">—</span><span class="dim"> → </span><span id="rpEqEnd">—</span></b></div>
+        <div class="rp-row"><span>淨值 高／低</span><b class="mono"><span id="rpEqHigh">—</span><span class="dim"> / </span><span id="rpEqLow">—</span></b></div>
+        <h3 class="rp-sub">觸發紀錄</h3>
+        <ul id="rpTriggers" class="rp-list"></ul>
+        <p class="sh-empty dim" id="rpEmpty" hidden>離線期間沒有任何觸發。</p>
+      </div>
+    </div>
   </div>
 
   <!-- Toast 堆疊 -->

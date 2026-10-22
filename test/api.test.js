@@ -463,8 +463,13 @@ test('靜態頁：GET / 回傳 public/index.html（無外部 CDN）', async () =
     const res = await app.inject({ method: 'GET', url: '/' });
     assert.equal(res.statusCode, 200);
     assert.match(res.headers['content-type'], /text\/html/);
-    assert.ok(res.body.includes('<!doctype html>'));
-    assert.ok(!/https?:\/\//.test(res.body), '不得引用外部 CDN');
+    // doctype 大小寫不拘（HTML 大小寫不敏感；前端可能寫成 <!DOCTYPE html>）
+    assert.ok(res.body.toLowerCase().includes('<!doctype html>'));
+    // 不得從外部網域載入資源（data: URI 內的 SVG namespace 不算外部引用）
+    const external = res.body.match(
+      /(?:src|href)\s*=\s*["']https?:\/\/[^"']+|url\(\s*["']?https?:\/\/[^"')]+/gi,
+    );
+    assert.equal(external, null, '不得引用外部 CDN');
   });
 });
 

@@ -25,14 +25,15 @@ import {
   FEE_SHORT_ANNUAL,
   LEVERAGE_OPTIONS,
   MAINTENANCE_MARGIN_RATE,
+  MAX_ACTIVE_RULES,
   MAX_POSITIONS,
   MIN_NOTIONAL_A,
-  MIN_SL_DISTANCE,
-  SL_MAX_LIQ_FACTOR,
   SPREAD_HALF,
 } from './config.js';
-import { liquidationDistance, minMarginForLeverage } from './account.js';
+import { minMarginForLeverage } from './account.js';
 import { markE4, positionJson, stateJson } from './serialize.js';
+import { resolvePct } from './pct.js';
+import { ruleJson } from './rules.js';
 import { WS_OPEN } from './live.js';
 
 // ---------------------------------------------------------------------------
@@ -91,38 +92,8 @@ export function mapReason(reason) {
 }
 
 // ---------------------------------------------------------------------------
-// 停損 / 停利百分比解析
+// 停損 / 停利百分比解析（實作在 `src/pct.js`，M2 下單與 M3 規則共用）
 // ---------------------------------------------------------------------------
-/**
- * `sl_pct` / `tp_pct` 的解讀（contract 請求範例：`"sl_pct": 0.5` = 0.5%）。
- *
- * 規則（決定性）：
- *   1. **主解讀 = 百分比數字**（0.5 → 0.005 小數比例），與 contract 的請求範例一致。
- *   2. 若百分比解讀違反引擎限制（太小 / 超過強平距離）但「小數比例」解讀合法，
- *      則採小數比例（相容另一種前端寫法）。
- *   3. 兩者都不合法 → 交給引擎產生正確的拒絕原因。
- */
-function resolvePct(raw, { kind, leverage }) {
-  if (raw === undefined || raw === null || raw === '') return { value: null };
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return { error: `${kind}_invalid` };
-
-  const percent = n / 100;
-  const fraction = n;
-
-  if (kind === 'sl') {
-    const maxFraction = liquidationDistance(leverage) * SL_MAX_LIQ_FACTOR;
-    const ok = (v) => v >= MIN_SL_DISTANCE && v <= maxFraction;
-    if (ok(percent)) return { value: percent };
-    if (ok(fraction)) return { value: fraction };
-    return { value: percent };
-  }
-
-  // tp：引擎只要求 > 0；百分比解讀小於 0.05%（低於最小停損距離）時改採小數比例
-  if (percent >= MIN_SL_DISTANCE) return { value: percent };
-  if (fraction <= 1) return { value: fraction };
-  return { value: percent };
-}
 
 // ---------------------------------------------------------------------------
 // 請求解析
@@ -256,6 +227,67 @@ export function registerApi(app, ctx) {
     };
   });
 
+  // ------------------------------------------------------------------
+  // M3：自動規則（§6.3）
+  // ------------------------------------------------------------------
+  app.get('/api/rules', async (req) => {
+    const userId = resolveUserId(req);
+    return {
+      max_active: MAX_ACTIVE_RULES,
+      rules: engine.rules.listFor(userId).map(ruleJson),
+    };
+  });
+
+  app.post('/api/rules', async (req) => {
+    const body = req?.body ?? {};
+    const userId = resolveUserId(req);
+    const result = engine.rules.createRule(userId, body);
+    if (!result.ok) return { ok: false, reason: result.reason };
+    return { ok: true, rule: ruleJson(result.rule) };
+  });
+
+  app.patch('/api/rules/:id', async (req) => {
+    const body = req?.body ?? {};
+    const userId = resolveUserId(req);
+    const id = Number(req?.params?.id);
+    if (!Number.isInteger(id)) return { ok: false, reason: 'not_found' };
+
+    const patch = {};
+    if (body.enabled !== undefined) patch.enabled = body.enabled;
+    for (const key of ['side', 'trigger_price_e4', 'margin_a', 'leverage', 'sl_pct', 'tp_pct', 'confirm']) {
+      if (body[key] !== undefined) patch[key] = body[key];
+    }
+    const result = engine.rules.updateRule(userId, id, patch);
+    if (!result.ok) return { ok: false, reason: result.reason };
+    return { ok: true, rule: ruleJson(result.rule) };
+  });
+
+  app.delete('/api/rules/:id', async (req) => {
+    const userId = resolveUserId(req);
+    const id = Number(req?.params?.id);
+    if (!Number.isInteger(id)) return { ok: false, reason: 'not_found' };
+    const result = engine.rules.cancelRule(userId, id);
+    if (!result.ok) return { ok: false, reason: result.reason };
+    return { ok: true, rule: ruleJson(result.rule) };
+  });
+
+  // ------------------------------------------------------------------
+  // M3：離線報告（§6.4）
+  // ------------------------------------------------------------------
+  app.get('/api/report', async (req) => {
+    const userId = resolveUserId(req);
+    // `scope=live`＝直接用目前的 last_seen_tick 往後算；預設＝最近一次連線時的離線報告
+    const scope = req?.query?.scope === 'live' ? 'live' : 'offline';
+    return engine.reports.get(userId, { scope });
+  });
+
+  app.post('/api/report/ack', async (req) => {
+    // 使用者可由 query / body 的 `user` 指定（UI 傳 body: { user }）
+    const userId = resolveUserId(req);
+    engine.reports.ack(userId);
+    return { ok: true };
+  });
+
   app.setErrorHandler((err, req, reply) => {
     reply.code(400).send({ ok: false, reason: 'invalid_request', message: err?.message });
   });
@@ -292,6 +324,12 @@ export function registerWs(app, ctx) {
     };
 
     hub.addClient(client);
+    // M3 §6.4：連線即視為「回到線上」→ 先算好剛結束的離線報告，再把 last_seen_tick 移到現在
+    try {
+      engine.reports?.onUserOnline(userId);
+    } catch {
+      /* DB 可能已關閉（測試收尾）：不影響連線 */
+    }
     // 立即 snapshot（重連也會重新送）
     hub.sendTo(client, { type: 'snapshot', data: stateJson({ engine, userId }) });
 
@@ -305,8 +343,19 @@ export function registerWs(app, ctx) {
       handleMessage(ctx, client, msg);
     });
 
-    socket.on('close', () => hub.removeClient(client));
-    socket.on('error', () => hub.removeClient(client));
+    const onClose = () => {
+      hub.removeClient(client);
+      // 該使用者的最後一條連線關閉 → 進入離線狀態（last_seen_tick = 現在）
+      if (hub.countFor(userId) === 0) {
+        try {
+          engine.reports?.onUserOffline(userId);
+        } catch {
+          /* DB 可能已關閉（測試收尾）：忽略 */
+        }
+      }
+    };
+    socket.on('close', onClose);
+    socket.on('error', onClose);
   });
 }
 
@@ -324,12 +373,30 @@ function handleMessage(ctx, client, msg) {
   }
   if (type === 'order.close') {
     handleOrderClose(ctx, client, msg);
+    return;
+  }
+  if (type === 'rule.upsert') {
+    handleRuleUpsert(ctx, client, msg);
+    return;
+  }
+  if (type === 'rule.delete') {
+    handleRuleDelete(ctx, client, msg);
   }
 }
 
 /** 使用者身分檢查：訊息帶的 user 必須與連線身分一致 */
 function userMatches(client, msg, data) {
   const claimed = msg?.user ?? data?.user;
+  if (claimed === undefined || claimed === null || claimed === '') return true;
+  return Number(claimed) === client.userId;
+}
+
+/**
+ * 規則訊息的身分檢查：**只看頂層 `user` 欄位**。
+ * `data` 內的 `user` 欄位一律忽略（UI 會在 `rule.upsert` 的 data 內帶 user）。
+ */
+function userMatchesRule(client, msg) {
+  const claimed = msg?.user;
   if (claimed === undefined || claimed === null || claimed === '') return true;
   return Number(claimed) === client.userId;
 }
@@ -420,4 +487,62 @@ function handleOrderClose(ctx, client, msg) {
       pnl_milli: result.pnlMilli,
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// M3：自動規則（WS）
+// ---------------------------------------------------------------------------
+
+/** 規則被拒絕 → `rule.rejected`（穩定原因字串） */
+function rejectRule(client, requestId, reason) {
+  client.sendText(JSON.stringify({
+    type: 'rule.rejected',
+    request_id: requestId ?? null,
+    data: { reason },
+  }));
+}
+
+/**
+ * `rule.upsert`：建立或更新一條條件開倉規則。
+ * 成功 → 由規則引擎廣播 `rule.updated`（帶 request_id）給該使用者的所有連線。
+ */
+function handleRuleUpsert(ctx, client, msg) {
+  const { engine } = ctx;
+  const requestId = msg?.request_id ?? null;
+  const data = msg?.data ?? {};
+
+  // 身分只看頂層 user（data 內的 user 忽略）
+  if (!userMatchesRule(client, msg)) {
+    rejectRule(client, requestId, 'user_mismatch');
+    return;
+  }
+
+  const ruleId = data.id ?? data.rule_id ?? data.ruleId;
+  const result = ruleId != null
+    ? engine.rules.updateRule(client.userId, Number(ruleId), data, { requestId })
+    : engine.rules.createRule(client.userId, data, { requestId });
+
+  if (!result.ok) rejectRule(client, requestId, result.reason);
+}
+
+/** `rule.delete`：取消一條規則（回 `rule.updated`，status=cancelled） */
+function handleRuleDelete(ctx, client, msg) {
+  const { engine } = ctx;
+  const requestId = msg?.request_id ?? null;
+  const data = msg?.data ?? {};
+
+  // 身分只看頂層 user（data 內的 user 忽略）
+  if (!userMatchesRule(client, msg)) {
+    rejectRule(client, requestId, 'user_mismatch');
+    return;
+  }
+
+  const ruleId = Number(data.rule_id ?? data.ruleId ?? data.id);
+  if (!Number.isInteger(ruleId)) {
+    rejectRule(client, requestId, 'not_found');
+    return;
+  }
+
+  const result = engine.rules.cancelRule(client.userId, ruleId, { requestId });
+  if (!result.ok) rejectRule(client, requestId, result.reason);
 }

@@ -16,6 +16,7 @@
 
 import { MILLI_PER_A } from './config.js';
 import { priceToE4 } from './money.js';
+import { ruleJson } from './rules.js';
 
 /** 目前標記價（e4 整數） */
 export function markE4(market) {
@@ -135,6 +136,8 @@ export function stateJson({ engine, userId, candleLimit = 60, eventLimit = 100 }
     positions: acct.openPositions().map((p) => positionJson(p, mark)),
     candles: engine.candles(candleLimit).map(candleJson),
     events: engine.events(eventLimit).map(eventJson).reverse(),
+    // M3：自動規則（§6.3）—— 玩家連線時即可渲染規則清單
+    rules: (engine.rules?.listFor(userId) ?? []).map(ruleJson),
   };
 }
 

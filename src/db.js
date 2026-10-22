@@ -14,7 +14,8 @@
 
 import { MILLI_PER_A } from './config.js';
 
-export const SCHEMA_SQL = `
+/** 建表（§6.2 v0.25 ＋ M3 擴充）；索引另外建（見 INDEXES_SQL） */
+export const TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   id             INTEGER PRIMARY KEY,
   google_sub     TEXT UNIQUE,
@@ -32,7 +33,12 @@ CREATE TABLE IF NOT EXISTS accounts (
   balance_milli     INTEGER NOT NULL DEFAULT 0,
   settled_tick_id   INTEGER NOT NULL DEFAULT 0,
   last_settled_tick INTEGER NOT NULL DEFAULT 0,
-  created_at        INTEGER NOT NULL DEFAULT 0
+  created_at        INTEGER NOT NULL DEFAULT 0,
+  -- M3（§6.4 離線報告）：上次連線的 tick、期間淨值高低點、上次連線時的淨值
+  last_seen_tick    INTEGER NOT NULL DEFAULT 0,
+  equity_high_milli INTEGER,
+  equity_low_milli  INTEGER,
+  equity_seen_milli INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS positions (
@@ -51,7 +57,8 @@ CREATE TABLE IF NOT EXISTS positions (
   opened_tick          INTEGER NOT NULL DEFAULT 0,
   closed_tick          INTEGER,
   close_price_e4       INTEGER,
-  pnl_milli            INTEGER NOT NULL DEFAULT 0
+  pnl_milli            INTEGER NOT NULL DEFAULT 0,
+  rule_id              INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS trades (
@@ -66,13 +73,40 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 
 CREATE TABLE IF NOT EXISTS rules (
-  id            INTEGER PRIMARY KEY,
-  user_id       INTEGER NOT NULL,
-  kind          TEXT NOT NULL,
-  params_json   TEXT NOT NULL DEFAULT '{}',
-  enabled       INTEGER NOT NULL DEFAULT 1,
-  created_tick  INTEGER NOT NULL DEFAULT 0,
-  triggered_tick INTEGER
+  id                INTEGER PRIMARY KEY,
+  user_id           INTEGER NOT NULL,
+  kind              TEXT NOT NULL,
+  params_json       TEXT NOT NULL DEFAULT '{}',
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  created_tick      INTEGER NOT NULL DEFAULT 0,
+  triggered_tick    INTEGER,
+  -- M3（§6.3）：條件開倉規則的明確欄位（params_json 仍保留完整快照）
+  side              TEXT NOT NULL DEFAULT 'long',
+  trigger_price_e4  INTEGER NOT NULL DEFAULT 0,
+  margin_a          INTEGER NOT NULL DEFAULT 0,
+  leverage          INTEGER NOT NULL DEFAULT 10,
+  sl_pct            REAL,
+  tp_pct            REAL,
+  status            TEXT NOT NULL DEFAULT 'active',
+  armed_side        TEXT,
+  last_error        TEXT,
+  paused_reason     TEXT,
+  last_notified_tick INTEGER,
+  pending_tick      INTEGER,
+  position_id       INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS rule_events (
+  id             INTEGER PRIMARY KEY,
+  user_id        INTEGER NOT NULL,
+  rule_id        INTEGER NOT NULL,
+  kind           TEXT NOT NULL,
+  tick_id        INTEGER NOT NULL DEFAULT 0,
+  side           TEXT,
+  price_e4       INTEGER,
+  notional_milli INTEGER,
+  pnl_milli      INTEGER,
+  reason         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -103,18 +137,64 @@ CREATE TABLE IF NOT EXISTS ledger (
   user_id     INTEGER NOT NULL,
   delta_milli INTEGER NOT NULL,
   reason      TEXT NOT NULL,
-  tick_id     INTEGER NOT NULL DEFAULT 0
+  tick_id     INTEGER NOT NULL DEFAULT 0,
+  source      TEXT NOT NULL DEFAULT 'system'
 );
 
 CREATE TABLE IF NOT EXISTS engine_state (
   key        TEXT PRIMARY KEY,
   value_json TEXT NOT NULL
 );
+`;
 
+/**
+ * 索引（必須在建表 + 遷移**之後**才建立：
+ * `idx_rules_user_status` 依賴 M3 新增的 `rules.status` 欄位）。
+ */
+export const INDEXES_SQL = `
 CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_trades_user_tick_id  ON trades(user_id, tick_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_user_tick_id  ON ledger(user_id, tick_id);
+CREATE INDEX IF NOT EXISTS idx_rules_user_status    ON rules(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_rule_events_user_tick ON rule_events(user_id, tick_id);
 `;
+
+/** 完整 schema（建表 + 索引）；供外部工具一次執行 */
+export const SCHEMA_SQL = `${TABLES_SQL}\n${INDEXES_SQL}`;
+
+/**
+ * M3 的欄位遷移（§6.2 v0.25 的表已存在於線上 DB → `CREATE TABLE IF NOT EXISTS` 不會補欄位）。
+ * 只補「缺」的欄位，既有資料與欄位名一律不動。
+ */
+export const MIGRATIONS = {
+  accounts: {
+    last_seen_tick: 'INTEGER NOT NULL DEFAULT 0',
+    equity_high_milli: 'INTEGER',
+    equity_low_milli: 'INTEGER',
+    equity_seen_milli: 'INTEGER',
+  },
+  positions: {
+    rule_id: 'INTEGER',
+  },
+  ledger: {
+    source: "TEXT NOT NULL DEFAULT 'system'",
+  },
+  rules: {
+    side: "TEXT NOT NULL DEFAULT 'long'",
+    trigger_price_e4: 'INTEGER NOT NULL DEFAULT 0',
+    margin_a: 'INTEGER NOT NULL DEFAULT 0',
+    leverage: 'INTEGER NOT NULL DEFAULT 10',
+    sl_pct: 'REAL',
+    tp_pct: 'REAL',
+    status: "TEXT NOT NULL DEFAULT 'active'",
+    armed_side: 'TEXT',
+    last_error: 'TEXT',
+    paused_reason: 'TEXT',
+    last_notified_tick: 'INTEGER',
+    pending_tick: 'INTEGER',
+    position_id: 'INTEGER',
+  },
+};
 
 // ---------------------------------------------------------------------------
 // 記憶體 store（測試用 / 沒有 better-sqlite3 時的 fallback）
@@ -152,6 +232,20 @@ export function createMemoryStore() {
     loadTrades(limit = 100) {
       return this._trades.slice(-limit);
     },
+    loadTradesRange(userId, fromTick = null, toTick = null) {
+      return this._trades
+        .filter((t) => t.userId === userId)
+        .filter((t) => (fromTick == null ? true : t.ts > fromTick))
+        .filter((t) => (toTick == null ? true : t.ts <= toTick))
+        .map((t) => ({
+          id: t.id,
+          kind: t.kind,
+          tick_id: t.ts ?? 0,
+          price_e4: t.priceE4,
+          notional_milli: t.notionalMilli,
+        }))
+        .sort((a, b) => a.tick_id - b.tick_id || a.id - b.id);
+    },
     savePosition(p) {
       this._positions.set(p.id, { ...p });
     },
@@ -163,10 +257,52 @@ export function createMemoryStore() {
       return status ? all.filter((p) => p.status === status) : all;
     },
     saveAccount(a) {
-      this._accounts.set(a.user_id, { ...a });
+      const key = a.user_id ?? a.userId;
+      this._accounts.set(key, { ...(this._accounts.get(key) ?? {}), ...a });
     },
     loadAccounts() {
       return [...this._accounts.values()];
+    },
+    updateAccountMeta(userId, meta) {
+      const key = userId ?? meta.user_id;
+      const prev = this._accounts.get(key) ?? { user_id: key };
+      this._accounts.set(key, {
+        ...prev,
+        user_id: key,
+        balance_milli: meta.balanceMilli ?? prev.balance_milli ?? 0,
+        settled_tick_id: meta.settledTickId ?? prev.settled_tick_id ?? 0,
+        last_settled_tick: meta.lastSettledTick ?? prev.last_settled_tick ?? 0,
+        last_seen_tick: meta.lastSeenTick ?? prev.last_seen_tick ?? 0,
+        equity_high_milli: meta.equityHighMilli ?? null,
+        equity_low_milli: meta.equityLowMilli ?? null,
+        equity_seen_milli: meta.equitySeenMilli ?? null,
+      });
+      return this._accounts.get(key);
+    },
+    saveRule(rule) {
+      this._rules.set(rule.id, { ...rule });
+    },
+    updateRule(rule) {
+      this._rules.set(rule.id, { ...(this._rules.get(rule.id) ?? {}), ...rule });
+    },
+    loadRules(userId = null) {
+      const all = [...this._rules.values()].sort((a, b) => a.id - b.id);
+      return userId == null ? all : all.filter((r) => r.userId === userId);
+    },
+    loadRule(id) {
+      return this._rules.get(id) ?? null;
+    },
+    saveRuleEvent(ev) {
+      const id = this._ruleEventSeq++;
+      this._ruleEvents.push({ ...ev, id });
+      return id;
+    },
+    loadRuleEvents(userId, fromTick = null, toTick = null) {
+      return this._ruleEvents
+        .filter((e) => e.userId === userId)
+        .filter((e) => (fromTick == null ? true : e.tickId > fromTick))
+        .filter((e) => (toTick == null ? true : e.tickId <= toTick))
+        .sort((a, b) => a.tickId - b.tickId || a.id - b.id);
     },
     saveUser(u) {
       this._users.set(u.id, { ...u });
@@ -188,6 +324,9 @@ export function createMemoryStore() {
     _accounts: new Map(),
     _users: new Map(),
     _ledger: [],
+    _rules: new Map(),
+    _ruleEvents: [],
+    _ruleEventSeq: 1,
   };
 }
 
@@ -218,10 +357,10 @@ class SqliteStore {
       insertPosition: db.prepare(
         `INSERT INTO positions (id, user_id, side, notional_milli, leverage, entry_price_e4, margin_milli,
                                 liq_price_e4, sl_price_e4, tp_price_e4, fee_remainder_micro, status,
-                                opened_tick, closed_tick, close_price_e4, pnl_milli)
+                                opened_tick, closed_tick, close_price_e4, pnl_milli, rule_id)
          VALUES (@id, @user_id, @side, @notional_milli, @leverage, @entry_price_e4, @margin_milli,
                  @liq_price_e4, @sl_price_e4, @tp_price_e4, @fee_remainder_micro, @status,
-                 @opened_tick, @closed_tick, @close_price_e4, @pnl_milli)`,
+                 @opened_tick, @closed_tick, @close_price_e4, @pnl_milli, @rule_id)`,
       ),
       updatePosition: db.prepare(
         `UPDATE positions SET fee_remainder_micro=@fee_remainder_micro, status=@status,
@@ -249,8 +388,41 @@ class SqliteStore {
            supply_a_milli=excluded.supply_a_milli`,
       ),
       insertLedger: db.prepare(
-        `INSERT INTO ledger (id, user_id, delta_milli, reason, tick_id)
-         VALUES (@id, @user_id, @delta_milli, @reason, @tick_id)`,
+        `INSERT INTO ledger (id, user_id, delta_milli, reason, tick_id, source)
+         VALUES (@id, @user_id, @delta_milli, @reason, @tick_id, @source)`,
+      ),
+      insertRule: db.prepare(
+        `INSERT INTO rules (id, user_id, kind, params_json, enabled, created_tick, triggered_tick,
+                            side, trigger_price_e4, margin_a, leverage, sl_pct, tp_pct, status,
+                            armed_side, last_error, paused_reason, last_notified_tick, pending_tick, position_id)
+         VALUES (@id, @user_id, @kind, @params_json, @enabled, @created_tick, @triggered_tick,
+                 @side, @trigger_price_e4, @margin_a, @leverage, @sl_pct, @tp_pct, @status,
+                 @armed_side, @last_error, @paused_reason, @last_notified_tick, @pending_tick, @position_id)`,
+      ),
+      updateRule: db.prepare(
+        `UPDATE rules SET enabled=@enabled, triggered_tick=@triggered_tick, side=@side,
+           trigger_price_e4=@trigger_price_e4, margin_a=@margin_a, leverage=@leverage,
+           sl_pct=@sl_pct, tp_pct=@tp_pct, status=@status, armed_side=@armed_side,
+           last_error=@last_error, paused_reason=@paused_reason, last_notified_tick=@last_notified_tick,
+           pending_tick=@pending_tick, position_id=@position_id, params_json=@params_json
+         WHERE id=@id`,
+      ),
+      insertRuleEvent: db.prepare(
+        `INSERT INTO rule_events (user_id, rule_id, kind, tick_id, side, price_e4,
+                                  notional_milli, pnl_milli, reason)
+         VALUES (@user_id, @rule_id, @kind, @tick_id, @side, @price_e4,
+                 @notional_milli, @pnl_milli, @reason)`,
+      ),
+      updateAccountMeta: db.prepare(
+        `INSERT INTO accounts (user_id, balance_milli, settled_tick_id, last_settled_tick, created_at,
+                               last_seen_tick, equity_high_milli, equity_low_milli, equity_seen_milli)
+         VALUES (@user_id, @balance_milli, @settled_tick_id, @last_settled_tick, 0,
+                 @last_seen_tick, @equity_high_milli, @equity_low_milli, @equity_seen_milli)
+         ON CONFLICT(user_id) DO UPDATE SET
+           balance_milli=excluded.balance_milli, settled_tick_id=excluded.settled_tick_id,
+           last_settled_tick=excluded.last_settled_tick,
+           last_seen_tick=excluded.last_seen_tick, equity_high_milli=excluded.equity_high_milli,
+           equity_low_milli=excluded.equity_low_milli, equity_seen_milli=excluded.equity_seen_milli`,
       ),
       upsertEngineState: db.prepare(
         `INSERT INTO engine_state (key, value_json) VALUES (@key, @value_json)
@@ -264,13 +436,39 @@ class SqliteStore {
       positions: db.prepare(`SELECT * FROM positions WHERE status = 'open' ORDER BY id`),
       allPositions: db.prepare(`SELECT * FROM positions ORDER BY id`),
       accounts: db.prepare(`SELECT * FROM accounts`),
+      accountById: db.prepare(`SELECT * FROM accounts WHERE user_id = ?`),
       users: db.prepare(`SELECT * FROM users`),
       ledger: db.prepare(`SELECT * FROM ledger ORDER BY id DESC LIMIT ?`),
+      tradesRange: db.prepare(
+        `SELECT id, kind, tick_id, price_e4, notional_milli FROM trades
+         WHERE user_id = ? AND tick_id > ? AND tick_id <= ? ORDER BY tick_id, id`,
+      ),
+      rules: db.prepare(`SELECT * FROM rules ORDER BY id`),
+      ruleById: db.prepare(`SELECT * FROM rules WHERE id = ?`),
+      ruleEvents: db.prepare(
+        `SELECT * FROM rule_events WHERE user_id = ? AND tick_id > ? AND tick_id <= ? ORDER BY tick_id, id`,
+      ),
     };
   }
 
   init() {
-    this.db.exec(SCHEMA_SQL);
+    // 順序：建表 → 遷移（補 M3 欄位）→ 建索引（索引依賴新欄位）
+    this.db.exec(TABLES_SQL);
+    this.migrate();
+    this.db.exec(INDEXES_SQL);
+  }
+
+  /** 補上 M3 新增的欄位（線上 DB 的 §6.2 v0.25 表已存在 → 不會被 CREATE TABLE 改動） */
+  migrate() {
+    for (const [table, columns] of Object.entries(MIGRATIONS)) {
+      const existing = new Set(
+        this.db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name),
+      );
+      for (const [name, decl] of Object.entries(columns)) {
+        if (existing.has(name)) continue;
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+      }
+    }
   }
 
   close() {
@@ -347,6 +545,15 @@ class SqliteStore {
     return this.stmt.trades.all(limit).reverse().map((r) => ({ ...r, ts: r.tick_id }));
   }
 
+  /** M3：期間內的成交（離線報告判斷「是否發生強平」） */
+  loadTradesRange(userId, fromTick = null, toTick = null) {
+    return this.stmt.tradesRange.all(
+      userId,
+      fromTick == null ? -1 : fromTick,
+      toTick == null ? Number.MAX_SAFE_INTEGER : toTick,
+    );
+  }
+
   savePosition(p) {
     this.stmt.insertPosition.run({
       id: p.id,
@@ -365,6 +572,7 @@ class SqliteStore {
       closed_tick: p.closedAt ?? null,
       close_price_e4: p.closePriceE4 ?? null,
       pnl_milli: p.pnlMilli ?? 0,
+      rule_id: p.ruleId ?? null,
     });
   }
 
@@ -423,11 +631,142 @@ class SqliteStore {
       delta_milli: l.deltaMilli,
       reason: l.reason,
       tick_id: l.ts ?? 0,
+      source: l.source ?? 'system',
     });
   }
 
   loadLedger(limit = 100) {
     return this.stmt.ledger.all(limit).reverse().map((r) => ({ ...r, ts: r.tick_id }));
+  }
+
+  /** M3：帳號的離線報告 metadata（last_seen_tick / 期間淨值高低點） */
+  updateAccountMeta(userId, meta) {
+    const prev = this.stmt.accountById.get(userId);
+    this.stmt.updateAccountMeta.run({
+      user_id: userId,
+      balance_milli: meta.balanceMilli ?? prev?.balance_milli ?? 0,
+      settled_tick_id: meta.settledTickId ?? prev?.settled_tick_id ?? 0,
+      last_settled_tick: meta.lastSettledTick ?? prev?.last_settled_tick ?? 0,
+      last_seen_tick: meta.lastSeenTick ?? 0,
+      equity_high_milli: meta.equityHighMilli ?? null,
+      equity_low_milli: meta.equityLowMilli ?? null,
+      equity_seen_milli: meta.equitySeenMilli ?? null,
+    });
+  }
+
+  // ------------------------------------------------------------ 規則（M3）
+  saveRule(rule) {
+    this.stmt.insertRule.run(ruleRow(rule));
+  }
+
+  updateRule(rule) {
+    this.stmt.updateRule.run(ruleRow(rule));
+  }
+
+  loadRules(userId = null) {
+    const rows = this.stmt.rules.all();
+    const list = userId == null ? rows : rows.filter((r) => r.user_id === userId);
+    return list.map(rowToRule);
+  }
+
+  loadRule(id) {
+    const row = this.stmt.ruleById.get(id);
+    return row ? rowToRule(row) : null;
+  }
+
+  saveRuleEvent(ev) {
+    const info = this.stmt.insertRuleEvent.run({
+      user_id: ev.userId,
+      rule_id: ev.ruleId,
+      kind: ev.kind,
+      tick_id: ev.tickId ?? 0,
+      side: ev.side ?? null,
+      price_e4: ev.priceE4 ?? null,
+      notional_milli: ev.notionalMilli ?? null,
+      pnl_milli: ev.pnlMilli ?? null,
+      reason: ev.reason ?? null,
+    });
+    return Number(info.lastInsertRowid);
+  }
+
+  loadRuleEvents(userId, fromTick = null, toTick = null) {
+    const rows = this.stmt.ruleEvents.all(
+      userId,
+      fromTick == null ? -1 : fromTick,
+      toTick == null ? Number.MAX_SAFE_INTEGER : toTick,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      userId: r.user_id,
+      ruleId: r.rule_id,
+      kind: r.kind,
+      tickId: r.tick_id,
+      side: r.side,
+      priceE4: r.price_e4,
+      notionalMilli: r.notional_milli,
+      pnlMilli: r.pnl_milli,
+      reason: r.reason,
+    }));
+  }
+}
+
+/** 規則物件 → SQLite 參數 */
+function ruleRow(rule) {
+  return {
+    id: rule.id,
+    user_id: rule.userId,
+    kind: rule.kind,
+    params_json: JSON.stringify(rule.params ?? {}),
+    enabled: rule.enabled ? 1 : 0,
+    created_tick: rule.createdTick ?? 0,
+    triggered_tick: rule.triggeredTick ?? null,
+    side: rule.side,
+    trigger_price_e4: rule.triggerPriceE4,
+    margin_a: rule.marginA,
+    leverage: rule.leverage,
+    sl_pct: rule.slPct ?? null,
+    tp_pct: rule.tpPct ?? null,
+    status: rule.status,
+    armed_side: rule.armedSide ?? null,
+    last_error: rule.lastError ?? null,
+    paused_reason: rule.pausedReason ?? null,
+    last_notified_tick: rule.lastNotifiedTick ?? null,
+    pending_tick: rule.pendingTick ?? null,
+    position_id: rule.positionId ?? null,
+  };
+}
+
+/** SQLite row → 規則物件 */
+export function rowToRule(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    kind: row.kind,
+    params: safeJson(row.params_json),
+    enabled: !!row.enabled,
+    createdTick: row.created_tick ?? 0,
+    triggeredTick: row.triggered_tick ?? null,
+    side: row.side,
+    triggerPriceE4: row.trigger_price_e4,
+    marginA: row.margin_a,
+    leverage: row.leverage,
+    slPct: row.sl_pct ?? null,
+    tpPct: row.tp_pct ?? null,
+    status: row.status,
+    armedSide: row.armed_side ?? null,
+    lastError: row.last_error ?? null,
+    pausedReason: row.paused_reason ?? null,
+    lastNotifiedTick: row.last_notified_tick ?? null,
+    pendingTick: row.pending_tick ?? null,
+    positionId: row.position_id ?? null,
+  };
+}
+
+function safeJson(text) {
+  try {
+    return JSON.parse(text ?? '{}');
+  } catch {
+    return {};
   }
 }
 

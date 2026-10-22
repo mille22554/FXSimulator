@@ -32,6 +32,8 @@ import { Market } from './market.js';
 import { Rng } from './rng.js';
 import { createMemoryStore } from './db.js';
 import { priceToE4 } from './money.js';
+import { RuleManager } from './rules.js';
+import { ReportService } from './report.js';
 
 const SETTLE_EVERY_TICKS = TICKS_PER_MINUTE * 5; // §5.4：每 5 分鐘結算一次
 
@@ -79,6 +81,10 @@ export class Engine {
     this._savedPositionIds = new Set();
     this._loading = false;
     this._restoredFromState = false;
+
+    // M3：離線自動規則引擎（§6.3）與離線報告（§6.4）
+    this.rules = new RuleManager({ engine: this });
+    this.reports = new ReportService({ engine: this });
 
     // M2：對外通知用的鉤子（不參與任何經濟計算，只負責「把已發生的結果通知出去」）
     //   onEvent(event)          → 新事件（payload 已濾掉 type / permanent_share）
@@ -214,6 +220,14 @@ export class Engine {
       const dbAccounts = new Map(
         (this.store.loadAccounts?.() ?? []).map((a) => [a.user_id ?? a.userId, a]),
       );
+      // M3：還原離線報告用的帳號 metadata（last_seen_tick / 期間淨值高低點）
+      for (const [userId, rec] of dbAccounts) {
+        const acct = this.ensureAccount(userId);
+        acct.lastSeenTick = rec.last_seen_tick ?? rec.lastSeenTick ?? 0;
+        acct.equityHighMilli = rec.equity_high_milli ?? rec.equityHighMilli ?? null;
+        acct.equityLowMilli = rec.equity_low_milli ?? rec.equityLowMilli ?? null;
+        acct.equitySeenMilli = rec.equity_seen_milli ?? rec.equitySeenMilli ?? null;
+      }
       let net = 0;
       for (const row of rows) {
         const pos = rowToPosition(row);
@@ -233,6 +247,9 @@ export class Engine {
       }
       if (net !== 0) this.market.setNetNotional(net / MILLI_PER_A);
       else this.market.recomputePrice();
+
+      // M3：還原自動規則（§6.3）
+      this.rules.load();
     } finally {
       this._loading = false;
     }
@@ -277,19 +294,34 @@ export class Engine {
       }
     }
 
-    // 3) 停損 / 停利
-    for (const acct of this.accounts.values()) {
-      const stopped = acct.checkStopOrders({ market: this.market, tickCount: this.ticksExecuted });
-      for (const r of stopped) this.#notifyPositionClosed(r, 'stop');
-    }
-
-    // 4) 強平（先收集全部觸發 → 再依序平倉並重算價格）
+    // 3) 強平（先收集全部觸發 → 再依序平倉並重算價格）
+    //    §6.3：每 tick 的執行順序為「強平 → 停損／停利 → 條件開倉」
     for (const acct of this.accounts.values()) {
       const liquidations = acct.liquidateIfNeeded({ market: this.market, tickCount: this.ticksExecuted });
-      for (const r of liquidations) this.#notifyLiquidated(r);
+      for (const r of liquidations) {
+        // M3：強平 → 暫停該使用者的所有啟用中規則（§6.3）
+        this.rules.handleLiquidation(r);
+        this.#notifyLiquidated(r);
+      }
     }
 
-    // 5) 分鐘收線
+    // 4) 停損 / 停利
+    for (const acct of this.accounts.values()) {
+      const stopped = acct.checkStopOrders({ market: this.market, tickCount: this.ticksExecuted });
+      for (const r of stopped) {
+        // M3：記錄規則開出的部位被停損／停利平倉（離線報告用）
+        this.rules.handleStopClosed(r);
+        this.#notifyPositionClosed(r, 'stop');
+      }
+    }
+
+    // 5) M3：條件開倉規則（成交上一 tick 觸發的 → 再以本 tick 的 last price 判定觸發）
+    this.rules.processTick(tickId);
+
+    // 6) 期間淨值高低點（離線報告 §6.4）
+    this.#trackEquity();
+
+    // 7) 分鐘收線
     if (this.ticksExecuted % TICKS_PER_MINUTE === 0) {
       this.#closeMinute();
     }
@@ -390,6 +422,54 @@ export class Engine {
     return result;
   }
 
+  // ------------------------------------------------------------ M3 規則
+  /**
+   * 規則成交（§6.3）：以**已含 0.1% 滑價**的成交價開倉，SL/TP 由成交價重算。
+   * @param {number} userId
+   * @param {object} rule 規則物件
+   * @param {number} fillPriceE4 成交價（e4 整數）
+   */
+  openRulePosition(userId, rule, fillPriceE4) {
+    const acct = this.ensureAccount(userId);
+    const result = acct.openPosition({
+      side: rule.side,
+      marginA: rule.marginA,
+      leverage: rule.leverage,
+      slPct: rule.slPct != null ? rule.slPct / 100 : null,
+      tpPct: rule.tpPct != null ? rule.tpPct / 100 : null,
+      market: this.market,
+      tickCount: this.ticksExecuted,
+      positionId: this.nextPositionId,
+      fillPriceE4,
+      ruleId: rule.id,
+    });
+    if (result.ok) {
+      this.nextPositionId += 1;
+      this.store.saveAccount?.({
+        user_id: userId,
+        balance_milli: acct.balanceMilli,
+        settled_tick_id: acct.settledTickId,
+        last_settled_tick: acct.settledTickId,
+        created_at: 0,
+      });
+    }
+    return result;
+  }
+
+  /** 寫回帳號的離線報告 metadata（last_seen_tick / 期間淨值高低點） */
+  persistAccountMeta(acct) {
+    // store.updateAccountMeta 是 upsert（餘額一併寫回），不需要另外呼叫 saveAccount
+    this.store.updateAccountMeta?.(acct.userId, {
+      balanceMilli: acct.balanceMilli,
+      settledTickId: acct.settledTickId,
+      lastSettledTick: acct.settledTickId,
+      lastSeenTick: acct.lastSeenTick ?? 0,
+      equityHighMilli: acct.equityHighMilli ?? null,
+      equityLowMilli: acct.equityLowMilli ?? null,
+      equitySeenMilli: acct.equitySeenMilli ?? null,
+    });
+  }
+
   // ------------------------------------------------------------ 查詢
   status(userId = this.userId) {
     const acct = this.accounts.get(userId);
@@ -437,6 +517,26 @@ export class Engine {
   // ------------------------------------------------------------ 內部
   #currentMinuteId() {
     return Math.floor(Math.max(0, this.ticksExecuted - 1) / TICKS_PER_MINUTE);
+  }
+
+  /**
+   * M3 §6.4：追蹤「自上次上線以來」的淨值最高／最低點（離線報告用）。
+   * 權益定義與 API 一致：可用餘額（現金 + 未結算收入）+ 在場保證金。
+   */
+  #trackEquity() {
+    for (const acct of this.accounts.values()) {
+      const eq = acct.equityMilli(this.ticksExecuted);
+      let changed = false;
+      if (acct.equityHighMilli == null || eq > acct.equityHighMilli) {
+        acct.equityHighMilli = eq;
+        changed = true;
+      }
+      if (acct.equityLowMilli == null || eq < acct.equityLowMilli) {
+        acct.equityLowMilli = eq;
+        changed = true;
+      }
+      if (changed) this.persistAccountMeta(acct);
+    }
   }
 
   #recordPrice(price, basePrice) {

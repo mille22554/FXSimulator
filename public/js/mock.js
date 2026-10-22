@@ -27,8 +27,10 @@ function gauss() {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
-export function createMockServer() {
+export function createMockServer(opts = {}) {
   const now = Date.now();
+  const forceReportKind = (opts && opts.forceReport) || null; // ?report=1（正常）/ =liq（含強平）：首連線強制回報
+  let forceReportServed = false;
   let tick = 43200;                       // 對齊「小時」感的 tick_id
   let price = 5.0000;                     // A/B，浮點內部值
   let anchor = 5.0000;
@@ -40,6 +42,16 @@ export function createMockServer() {
   let nextEventIn = 40 + Math.random() * 120;
   const clients = new Set();
   let timer = null;
+
+  /* ── M3：條件單＋離線報告狀態 ── */
+  const rules = [];                 // Rule[]（contract 形狀＋內部 _fillTick）
+  let ruleSeq = 1;
+  let lastSeenTick = null;          // 上次 detach 時 tick（離線期起點）
+  let lastSeenWall = null;          // detach 牆鐘
+  let lastSeenEquity = null;
+  let eqStart = null;               // 本次 attach 後淨值基準
+  let eqHigh = null, eqLow = null;  // attach 期間淨值高低
+  let incomeMilli = 0;              // attach 期間已實現損益（平倉＋強平）
 
   /* ── 初始 60 根 1 分 K ── */
   const candles = [];
@@ -156,11 +168,28 @@ export function createMockServer() {
         positions.splice(i, 1);
         const pnl = -Math.round(pos.margin_milli * 0.8); // 維持 80%：吞掉 80% 保證金，剩 20% 回可用
         balanceMilli += pos.margin_milli + pnl;          // 已用保證金退回 + 強平損
+        incomeMilli += pnl;
+        pauseRulesOnLiquidation();                       // M3：強平 → 暫停全部生效中條件單
         broadcast({
           type: 'liquidation',
           data: { position_id: pos.id, price_e4: price_e4, pnl_milli: pnl },
         });
       }
+    }
+
+    // ── M3 rule fills（liquidations → SL/TP → rule fills；成交在觸發 tick 的下一 tick） ──
+    for (let i = rules.length - 1; i >= 0; i--) {
+      const r = rules[i];
+      if (r._fillTick !== tick) continue;
+      fillRuleNow(r);
+    }
+
+    // ── M3 trigger 評估（本 tick 最後價格；命中 → 排定下一 tick 成交） ──
+    for (const r of rules) {
+      if (r.status !== 'active' || r.enabled === false || r._fillTick != null) continue;
+      const trig = r.trigger_price_e4 / 10000;
+      const hit = r.armed_side === 'above' ? price >= trig : price <= trig;
+      if (hit) r._fillTick = tick + 1;
     }
 
     broadcast({
@@ -174,10 +203,18 @@ export function createMockServer() {
           impact: 0,
           net_notional_milli: Math.round(netNotional),
         },
-        account: accountMsg(),
+        account: broadcastAccount(),
         positions: positions.map(p => ({ ...p })),
       },
     });
+  }
+
+  /* 淨值統計（離線報告用）：attach 期間高低點 */
+  function broadcastAccount() {
+    const a = accountMsg();
+    if (a.equity_milli > (eqHigh ?? -Infinity)) eqHigh = a.equity_milli;
+    if (a.equity_milli < (eqLow ?? Infinity)) eqLow = a.equity_milli;
+    return a;
   }
 
   let mockForming = null;
@@ -233,12 +270,212 @@ export function createMockServer() {
     for (const cb of clients) { try { cb(msg); } catch { /* noop */ } }
   }
 
+  /* ══ M3：條件單引擎 ═════════════════════════════════ */
+  function serializeRule(r) {
+    const pub = { ...r };
+    delete pub._fillTick;
+    delete pub._lastNotifiedTick;
+    return pub;
+  }
+
+  function validateRuleData(d) {
+    if (d.side !== 'long' && d.side !== 'short') return 'invalid_side';
+    if (!LEVERAGES.includes(Number(d.leverage))) return 'invalid_leverage';
+    const minA = MIN_MARGIN_A[Number(d.leverage)] || 1000;
+    if (!(Number(d.margin_a) >= minA)) return 'invalid_margin';
+    const trig = Number(d.trigger_price_e4);
+    if (!(trig > 0)) return 'invalid_trigger';
+    if (Math.round(Number(d.margin_a) * 1000) > accountMsg().available_milli) return 'insufficient_margin';
+    const gap = Math.abs(trig / 10000 - price) / price;
+    if (gap < 0.0005) return 'trigger_too_close'; // 觸發價貼現價 <0.05%（優先於上限，安全反饋）
+    if (rules.filter(r => r.status === 'active' && r.enabled !== false).length >= 2) return 'max_active_rules';
+    return null;
+  }
+
+  /** 成交嘗試（觸發 tick 的下一 tick 以市價成交；失敗不停用規則，僅記 last_error） */
+  function fillRuleNow(r) {
+    r._fillTick = null;
+    const fail = reason => {
+      r.last_error = reason;
+      const due = r._lastNotifiedTick == null || tick - r._lastNotifiedTick >= 300; // 最多 5 分鐘一次
+      if (due) {
+        r._lastNotifiedTick = tick;
+        broadcast({ type: 'rule.skipped', data: { rule_id: r.id, reason } });
+        broadcast({ type: 'rule.updated', data: serializeRule(r) });
+      }
+    };
+    const lev = Number(r.leverage);
+    const marginMilli = Math.round(Number(r.margin_a) * 1000);
+    const acct = accountMsg();
+    if (marginMilli > acct.available_milli) return fail('insufficient_balance');
+    if (positions.length >= MAX_POSITIONS) return fail('max_positions');
+    if (acct.available_milli <= 0) return fail('debt_no_open');
+
+    const side = r.side;
+    // 合約：買——下一價 > 觸發價 → 成交 = 下一價 ×1.001；賣——下一價 < 觸發價 → ×0.999
+    const trig = r.trigger_price_e4 / 10000;
+    const worse = side === 'long' ? price > trig : price < trig;
+    const fill = price * (worse ? (side === 'long' ? 1.001 : 0.999) : 1);
+    const fill_e4 = Math.round(fill * 10000);
+    const liqDist = 1 / lev - MAINT_RATE;
+    const dirMarker = side === 'long' ? -1 : 1;
+    const pos = {
+      id: posSeq++,
+      side,
+      notional_milli: marginMilli * lev,
+      leverage: lev,
+      entry_price_e4: fill_e4,
+      margin_milli: marginMilli,
+      liq_price_e4: Math.round(fill * (1 + dirMarker * liqDist) * 10000),
+      sl_price_e4: r.sl_pct ? Math.round(fill * (1 + dirMarker * Number(r.sl_pct) / 100) * 10000) : null,
+      tp_price_e4: r.tp_pct ? Math.round(fill * (1 - dirMarker * Number(r.tp_pct) / 100) * 10000) : null,
+      pnl_milli: 0,
+      status: 'open',
+    };
+    positions.push(pos);
+    r.status = 'triggered';
+    r.triggered_tick = tick;
+    r.last_error = null;
+    broadcast({
+      type: 'rule.triggered',
+      data: { rule_id: r.id, position_id: pos.id, side, fill_price_e4: fill_e4, notional_milli: pos.notional_milli },
+    });
+    broadcast({ type: 'rule.updated', data: serializeRule(r) });
+  }
+
+  /** 強平 → 暫停該使用者全部生效中條件單（paused_reason='liquidation'，需手動恢復） */
+  function pauseRulesOnLiquidation() {
+    for (const r of rules) {
+      if (r.status === 'active') {
+        r.status = 'paused';
+        r.paused_reason = 'liquidation';
+        r._fillTick = null;
+        broadcast({ type: 'rule.updated', data: serializeRule(r) });
+      }
+    }
+  }
+
+  /** 離線報告：GET /api/report（以 server 端 last_seen_tick 計算離線期間；唯讀） */
+  function buildReport() {
+    const equity = accountMsg().equity_milli;
+    if (forceReportKind && !forceReportServed) {
+      forceReportServed = true;
+      const liq = forceReportKind === 'liq';
+      return {
+        since_tick: tick - 3600,
+        until_tick: tick,
+        offline_seconds: 3600,
+        income_milli: liq ? -2150000 : 1260000,
+        equity_start_milli: 100000000,
+        equity_end_milli: liq ? 78500000 : 100350000,
+        equity_high_milli: liq ? 100420000 : 101100000,
+        equity_low_milli: liq ? 78500000 : 99850000,
+        liquidated: liq,
+        triggers: liq ? [
+          { rule_id: 3, kind: 'open', tick_id: tick - 2500, side: 'long', price_e4: 50120, notional_milli: 10000000, pnl_milli: null },
+          { rule_id: 3, kind: 'liquidation', tick_id: tick - 300, side: 'long', price_e4: 45860, notional_milli: 10000000, pnl_milli: -2150000 },
+        ] : [
+          { rule_id: 3, kind: 'open', tick_id: tick - 2500, side: 'long', price_e4: 50120, notional_milli: 10000000, pnl_milli: null },
+          { rule_id: 3, kind: 'tp', tick_id: tick - 1900, side: 'long', price_e4: 50620, notional_milli: 10000000, pnl_milli: 990000 },
+          { rule_id: 4, kind: 'skipped', tick_id: tick - 800, side: null, price_e4: null, notional_milli: null, pnl_milli: null, reason: 'insufficient_balance' },
+        ],
+      };
+    }
+    return {
+      since_tick: lastSeenTick != null ? lastSeenTick : tick,
+      until_tick: tick,
+      offline_seconds: lastSeenWall != null ? Math.max(0, Math.round((Date.now() - lastSeenWall) / 1000)) : 0,
+      income_milli: Math.round(incomeMilli),
+      equity_start_milli: eqStart != null ? eqStart : equity,
+      equity_end_milli: equity,
+      equity_high_milli: eqHigh != null ? Math.max(eqHigh, equity) : equity,
+      equity_low_milli: eqLow != null ? Math.min(eqLow, equity) : equity,
+      liquidated: false, // 離線期間 mock 市場不跳動，不會有離線強平；?report=liq 可演示紅色警示
+      triggers: [],
+    };
+  }
+
+  /** mock REST shim：契約 REST 端點由模擬伺服器代答（不經 fetch） */
+  function handleRest(path, method = 'GET', body = {}) {
+    if (method === 'GET' && path.startsWith('/api/rules')) {
+      return { max_active: 2, rules: rules.map(serializeRule) };
+    }
+    const m = path.match(/^\/api\/rules\/(\d+)$/);
+    if (m && method === 'PATCH') {
+      const r = rules.find(x => x.id === Number(m[1]));
+      if (!r) return { ok: false, reason: 'invalid_trigger' };
+      if (r.status === 'triggered' || r.status === 'cancelled') return { ok: false, reason: 'invalid_trigger' };
+      if (body.enabled === true) {
+        const actives = rules.filter(x => x.status === 'active' && x.id !== r.id).length;
+        if (actives >= 2) return { ok: false, reason: 'max_active_rules' };
+        r.status = 'active';
+        r.enabled = true;
+        r.last_error = null;
+        r.paused_reason = null;
+      } else if (body.enabled === false) {
+        r.enabled = false;
+        r.status = 'paused';
+        r.paused_reason = 'manual';
+        r._fillTick = null;
+      }
+      broadcast({ type: 'rule.updated', data: serializeRule(r) });
+      return { ok: true, rule: serializeRule(r) };
+    }
+    if (m && method === 'DELETE') {
+      const r = rules.find(x => x.id === Number(m[1]));
+      if (r) {
+        r.status = 'cancelled';
+        r._fillTick = null;
+        broadcast({ type: 'rule.updated', data: serializeRule(r) });
+      }
+      return { ok: true };
+    }
+    if (path === '/api/report' && method === 'GET') return buildReport();
+    if (path === '/api/report/ack' && method === 'POST') return { ok: true };
+    return { ok: false, reason: 'not_found' };
+  }
+
   /* ── 訂單處理 ── */
   function handle(msg, session) {
     const reply = m => session.cb(m);
     const data = msg.data || {};
 
     if (msg.type === 'ping') { reply({ type: 'pong' }); return; }
+
+    /* ── M3：條件單 WS（rule.upsert / rule.delete；回覆 rule.updated / rule.rejected） ── */
+    if (msg.type === 'rule.upsert') {
+      const reason = validateRuleData(data);
+      if (reason) return reply({ type: 'rule.rejected', request_id: msg.request_id, data: { reason } });
+      const trig = Number(data.trigger_price_e4);
+      const rule = {
+        id: ruleSeq++,
+        kind: 'conditional_open',
+        side: data.side,
+        trigger_price_e4: trig,
+        margin_a: Number(data.margin_a),
+        leverage: Number(data.leverage),
+        sl_pct: data.sl_pct != null ? Number(data.sl_pct) : null,
+        tp_pct: data.tp_pct != null ? Number(data.tp_pct) : null,
+        enabled: true,
+        status: 'active',
+        armed_side: trig / 10000 > price ? 'above' : 'below',
+        created_tick: tick,
+        triggered_tick: null,
+        last_error: null,
+      };
+      rules.push(rule);
+      reply({ type: 'rule.updated', request_id: msg.request_id, data: serializeRule(rule) });
+      return;
+    }
+
+    if (msg.type === 'rule.delete') {
+      const r = rules.find(x => x.id === Number(data.rule_id));
+      if (!r) return reply({ type: 'rule.rejected', request_id: msg.request_id, data: { reason: 'invalid_trigger' } });
+      r.status = 'cancelled';
+      r._fillTick = null;
+      reply({ type: 'rule.updated', request_id: msg.request_id, data: serializeRule(r) });
+      return;
+    }
 
     if (msg.type === 'order.open') {
       const lev = Number(data.leverage);
@@ -317,6 +554,7 @@ export function createMockServer() {
       // pnl 一律以 e4 價差比例乘名目（毫 A）：notional × (exit_e4 − entry_e4) / entry_e4
       const pnl = Math.round(pos.notional_milli * dir * (exit_e4 - pos.entry_price_e4) / pos.entry_price_e4);
       positions.splice(idx, 1);
+      incomeMilli += pnl; // 離線報告：attach 期間已實現損益
       reply({ type: 'order.filled', request_id: msg.request_id, data: {
         side: pos.side,
         position: { ...pos, status: 'closed', pnl_milli: pnl },
@@ -340,6 +578,9 @@ export function createMockServer() {
     attach(cb) {
       clients.add(cb);
       if (!timer) timer = setInterval(simTick, 1000);
+      const eq = accountMsg().equity_milli;
+      eqStart = eq; eqHigh = eq; eqLow = eq;   // 離線報告：attach 起點
+      lastSeenTick = null; lastSeenWall = null; // 新會話：重置離線起點
       let resolveReady;
       const ready = new Promise(r => { resolveReady = r; });
       const session = { cb, ready };
@@ -348,8 +589,11 @@ export function createMockServer() {
       return session;
     },
     handle,
+    handleRest, // mock REST shim（contract REST 端點）
     detach(session) {
       clients.delete(session.cb);
+      lastSeenTick = tick;                       // 離線期起點
+      lastSeenWall = Date.now();
       if (!clients.size && timer) { clearInterval(timer); timer = null; }
     },
   };

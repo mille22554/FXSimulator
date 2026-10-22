@@ -1,8 +1,8 @@
 {
   "name": "fxsim-m1",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "FXSimulator M2 - market engine + REST API + WebSocket (frontend served from public/)",
+  "description": "FXSimulator M3 - market engine + REST API + WebSocket + offline conditional-order rules & report (frontend served from public/)",
   "type": "module",
   "engines": {
     "node": ">=20"

@@ -47,6 +47,14 @@ export class LiveHub {
         price_e4: info.price_e4,
         pnl_milli: info.pnl_milli,
       });
+
+    // M3：自動規則通知（§6.3 / contract「WebSocket additions」）
+    if (engine.rules) {
+      engine.rules.onRuleUpdated = (userId, rule, meta) =>
+        this.sendRuleUpdated(userId, rule, meta);
+      engine.rules.onRuleTriggered = (userId, data) => this.sendRuleTriggered(userId, data);
+      engine.rules.onRuleSkipped = (userId, data) => this.sendRuleSkipped(userId, data);
+    }
   }
 
   // ------------------------------------------------------------ 連線管理
@@ -149,6 +157,41 @@ export class LiveHub {
     for (const client of this.clients) {
       if (client.userId === userId) this.#send(client, text);
     }
+  }
+
+  // ------------------------------------------------------------ M3 規則
+  /** 規則變更（建立／編輯／暫停／恢復／觸發／取消）→ 只送給該使用者 */
+  sendRuleUpdated(userId, rule, meta = {}) {
+    this.#sendToUser(userId, {
+      type: 'rule.updated',
+      request_id: meta?.requestId ?? null,
+      data: rule,
+    });
+  }
+
+  /** 規則成交 → 只送給該使用者 */
+  sendRuleTriggered(userId, data) {
+    this.#sendToUser(userId, { type: 'rule.triggered', data });
+  }
+
+  /** 規則成交失敗（跳過）→ 只送給該使用者（每 5 分鐘最多一次） */
+  sendRuleSkipped(userId, data) {
+    this.#sendToUser(userId, { type: 'rule.skipped', data });
+  }
+
+  #sendToUser(userId, message) {
+    if (this.clients.size === 0) return;
+    const text = JSON.stringify(message);
+    for (const client of this.clients) {
+      if (client.userId === userId) this.#send(client, text);
+    }
+  }
+
+  /** 某使用者的連線數（斷線時判斷是否「完全離線」） */
+  countFor(userId) {
+    let n = 0;
+    for (const client of this.clients) if (client.userId === userId) n += 1;
+    return n;
   }
 
   /** 單一連線送訊息（給 API 層用：snapshot / order.filled / order.rejected / pong） */

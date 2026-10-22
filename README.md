@@ -1,9 +1,10 @@
-# FXSimulator — M1（市場引擎 + 帳戶 + CLI）＋ M2（HTTP API + WebSocket）
+# FXSimulator — M1（市場引擎 + 帳戶 + CLI）＋ M2（HTTP API + WebSocket）＋ M3（離線規則 + 離線報告）
 
 依 `FXSimulator-Spec.md` **v0.25** 實作：
 
 - **M1 里程碑**：A/B 合成標的（CFD）的市場引擎、逐倉帳戶、強平與持倉費、SQLite 持久化、CLI 情境驗證。
 - **M2 里程碑**：Fastify HTTP API、WebSocket 即時協定、每秒 tick 迴圈，以及 **桌機交易頁**（走勢圖、下單面板、持倉、新聞看板；無建置步驟、無 CDN）。
+- **M3 里程碑（後端）**：**離線自動規則引擎**（§6.3 條件開倉，一次性、每帳號 2 條、0.1% 變差滑價、強平暫停）＋ **離線報告**（§6.4 收入 / 淨值高低 / 觸發明細 / 是否強平）。
 
 - 純 ESM JavaScript（Node 20+），**無 TypeScript、無建置步驟**
 - 唯一原生相依套件：`better-sqlite3`（以動態 `import()` 載入，純邏輯測試可在原生模組缺席時執行）；
@@ -35,16 +36,20 @@ npm 11.16+ 另有安裝腳本白名單機制，套件已於 `package.json` 的 `
 | `src/money.js` | milli-A / 微 A、e4 價格換算、持倉費微 A 計算（`hourlyFeeMicro` / `chargeFromMicro`）、P&L 四捨五入 |
 | `src/market.js` | 價格引擎：OU + 事件三層 + 玩家衝擊 + 流動性深度 L |
 | `src/account.js` | 帳戶：收入、開平倉、衝擊成交價、強平、停損停利、持倉費 |
-| `src/db.js` | §6.2 schema（WAL）、記憶體 store 與 SQLite store、save/load |
-| `src/engine.js` | tick 協調：事件+OU、分鐘 K 線、強平檢查、持久化；M2 加 `onEvent` / `onLiquidation` / `onPositionClosed` 通知鉤子 |
-| `src/serialize.js` | **M2**：唯一對外輸出的序列化層（狀態 / tick / 持倉 / K 線 / 事件；事件永不輸出 `type`、`permanent_share`） |
-| `src/api.js` | **M2**：REST 路由（`/healthz`、`/api/*`）＋ WebSocket `/ws` 協定處理 |
-| `src/live.js` | **M2**：live hub（連線登錄簿、每秒 tick 廣播、事件廣播、強平通知、漂移校正 tick 迴圈） |
+| `src/db.js` | §6.2 schema（WAL）、記憶體 store 與 SQLite store、save/load、**M3 欄位遷移** |
+| `src/engine.js` | tick 協調：事件+OU、分鐘 K 線、強平檢查、持久化；M2 加 `onEvent` / `onLiquidation` / `onPositionClosed` 通知鉤子；**M3** 加規則成交、期間淨值高低點追蹤 |
+| `src/serialize.js` | **M2**：唯一對外輸出的序列化層（狀態 / tick / 持倉 / K 線 / 事件；事件永不輸出 `type`、`permanent_share`）；**M3** 加 `rules` |
+| `src/api.js` | **M2**：REST 路由（`/healthz`、`/api/*`）＋ WebSocket `/ws` 協定處理；**M3** 加 `/api/rules`、`/api/report` 與 `rule.upsert` / `rule.delete` |
+| `src/live.js` | **M2**：live hub（連線登錄簿、每秒 tick 廣播、事件廣播、強平通知、漂移校正 tick 迴圈）；**M3** 加規則通知 |
 | `src/server.js` | **M2**：Fastify app（websocket + 靜態檔）、listen、優雅關機 |
+| `src/rules.js` | **M3**：條件開倉規則引擎（觸發判定、下一 tick 成交、變差滑價、失敗重試與冷卻、強平暫停、規則事件） |
+| `src/report.js` | **M3**：離線報告（`last_seen_tick`、收入、淨值高低、觸發明細、是否強平） |
+| `src/pct.js` | **M3**：`sl_pct` / `tp_pct` 百分比解析（M2 下單與 M3 規則共用） |
 | `src/scenarios.js` | §10 驗收情境（roundtrip / pump / liquidation / gap / opposing） |
 | `src/cli.js` | CLI：`init` `status` `tick` `open` `close` `candles` `events` `scenario` `reset` |
 | `public/` | **M2**：桌機交易頁（`index.html`、`styles.css`、`js/`；含 `?mock=1` 模擬模式） |
 | `test/api.test.js` | **M2**：REST + WebSocket 驗收（`fastify.inject` ＋ `ws`） |
+| `test/rules.test.js` | **M3**：規則 + 離線報告驗收（20 個） |
 
 
 ## 前端（M2 桌機）
@@ -101,13 +106,89 @@ nginx 會剝掉 `/FXSimulator/` 前綴（`proxy_pass http://127.0.0.1:2641/`）�
 | GET | `/api/events?limit=100` | 事件，**最新 → 最舊**；**永不**含 `type` / `permanent_share` |
 | POST | `/api/open` | `{ side, margin_a, leverage, sl_pct?, tp_pct? }` → `{ ok, position, fill }` |
 | POST | `/api/close` | `{ position_id }` → `{ ok, exit_price_e4, pnl_milli }` |
+| GET | `/api/rules?user=1` | **M3**：`{ max_active: 2, rules: [Rule] }` |
+| POST | `/api/rules` | **M3**：`{ side, trigger_price_e4, margin_a, leverage, sl_pct?, tp_pct?, confirm? }` → `{ ok, rule }` |
+| PATCH | `/api/rules/:id` | **M3**：`{ enabled }`（或改參數）→ `{ ok, rule }` |
+| DELETE | `/api/rules/:id` | **M3**：取消規則 → `{ ok, rule }` |
+| GET | `/api/report?user=1` | **M3**：離線報告（`scope=live` 可強制用目前的 `last_seen_tick` 往後算） |
+| POST | `/api/report/ack` | **M3**（選用）：把 `last_seen_tick` 移到現在 → `{ ok: true }`（使用者可放 query 或 body 的 `user`） |
+
+### M3 穩定原因字串
+
+| 情境 | 原因 |
+|------|------|
+| 建立規則被拒 | `max_active_rules` / `trigger_too_close` / `invalid_trigger` / `invalid_margin` / `invalid_leverage` / `invalid_side` / `insufficient_margin` / `sl_invalid` / `tp_invalid` |
+| 編輯 / 取消 | `not_found` / `rule_not_active`（已觸發或已取消的規則不得重新啟用） |
+| 成交失敗（跳過） | `insufficient_balance` / `max_positions` / `debt_no_open` / `invalid_margin` / `insufficient_margin` / `sl_too_close` / `sl_beyond_liq` / `tp_invalid` |
 
 ### WebSocket `/ws?user=1`
 
 - 伺服器 → 客戶端：`snapshot`（連線即送）｜`tick`（每秒）｜`order.filled` / `order.rejected`
   （回傳 `request_id`）｜`liquidation`（只送受影響的使用者）｜`event`｜`pong`
-- 客戶端 → 伺服器：`order.open`｜`order.close`｜`ping`
+  ｜**M3**：`rule.updated` / `rule.triggered` / `rule.skipped`
+- 客戶端 → 伺服器：`order.open`｜`order.close`｜`ping`｜**M3**：`rule.upsert` / `rule.delete`
 - 重連後伺服器會重新送 `snapshot`，前端以 `snapshot` 覆蓋本地狀態。
+- **M3 規則訊息細節**：
+  - `rule.upsert` 的 `data` 可帶 `user` 欄位（會被**忽略**，身分只認連線與頂層 `user`）；
+    成功 → 廣播 `rule.updated`（帶 `request_id`），失敗 → `rule.rejected`（帶 `reason`）。
+  - `rule.delete` 的 `data` 為 `{ rule_id }`；成功 → `rule.updated`（`status='cancelled'`）。
+  - **編輯規則＝先 `DELETE` 再 `POST`**（已取消的規則不佔 2 條額度），沒有另外的編輯端點。
+  - `snapshot.rules[]` 與 `GET /api/state` 的 `rules[]` 形狀相同（contract「Rule shape」）。
+
+---
+
+## M3 離線自動規則（§6.3）與離線報告（§6.4）
+
+### 條件開倉規則（`conditional_open`）
+
+- **一次性**：成功成交後 `status='triggered'`，永不再次觸發，且**不佔** 2 條額度。
+- **每帳號最多 2 條「啟用中」（`status='active'`）** 的規則；已觸發 / 已取消不計。
+- **方向**在建立時決定（`armed_side`）：觸發價 > 現價 → `above`（`price >= trigger` 觸發）；
+  觸發價 < 現價 → `below`（`price <= trigger` 觸發）。
+- **觸發判定**用 tick 的 last price；**成交在下一 tick**，成交價 = 成交 tick 的市價，
+  **0.1% 滑價只在變差時加**（買：next > trigger → ×1.001；賣：next < trigger → ×0.999）。
+- 規則開倉的 **SL / TP 以實際成交價重算**；成交價已穿過 SL → **立刻平倉**。
+- **每 tick 執行順序**：強平 → 停損／停利 → 規則成交（§6.3）。
+- **成交失敗**（餘額不足 / 持倉滿 / 欠款…）→ **不自動停用**：回到 `active` + `last_error`，
+  同一規則 **5 分鐘（300 ticks）最多通知一次**。
+- **強平 → 暫停**該使用者的所有啟用中規則（`status='paused'`、`paused_reason='liquidation'`），
+  需手動重新啟用（`PATCH { enabled: true }` → `active`、`last_error=null`）。
+- 觸發價已在現價（或差 < 0.05%）→ 建立時回 `trigger_too_close`；
+  玩家確認後可帶 `confirm: true` 建立。
+
+### 規則狀態機
+
+```
+create ──► active ──觸發──► triggered（一次性，結束）
+             │  ▲
+      強平暫停 │  │ 手動重新啟用
+             ▼  │
+          paused ─┘
+   （任何狀態）── DELETE ──► cancelled
+```
+
+### 離線報告（`GET /api/report`）
+
+- 區間 = `[last_seen_tick, now]`；`last_seen_tick` 存在 `accounts` 表，**WS 連線時更新**
+  （斷線時也會更新 → 離線期間從斷線那一刻算起）。
+- WS 連線的那一刻會先把「剛結束的離線期間」算好並快取 → 玩家在線時仍看得到登入前的報告；
+  `POST /api/report/ack`（選用）會把 `last_seen_tick` 移到現在。
+- 欄位：`since_tick` `until_tick` `offline_seconds`（1 tick = 1 秒）
+  `income_milli`（35,000 milli-A × tick 數）`equity_start_milli` `equity_end_milli`
+  `equity_high_milli` `equity_low_milli` `liquidated` `triggers[]`。
+- `triggers[]` 由舊到新，`kind` ∈ `open|sl|tp|liquidation|skipped`（`skipped` 另帶 `reason`）。
+
+### M3 資料表擴充（§6.2 v0.25 欄位全部保留）
+
+| 表 | 新增 |
+|----|------|
+| `rules` | `side` `trigger_price_e4` `margin_a` `leverage` `sl_pct` `tp_pct` `status` `armed_side` `last_error` `paused_reason` `last_notified_tick` `pending_tick` `position_id`（`params_json` 仍保留完整快照） |
+| `rule_events` | 新表：`id, user_id, rule_id, kind, tick_id, side, price_e4, notional_milli, pnl_milli, reason` |
+| `accounts` | `last_seen_tick` `equity_high_milli` `equity_low_milli` `equity_seen_milli` |
+| `positions` | `rule_id`（部位由哪條規則開出；`null` = 玩家手動） |
+| `ledger` | `source`（規則開倉的相關分錄標記為 `rule`） |
+
+> 線上既有 DB 不需重建：啟動時會自動 `ALTER TABLE` 補上上表的新欄位（`src/db.js` 的 `MIGRATIONS`）。
 
 ### 單位與認證（M2 臨時制）
 
@@ -225,8 +306,8 @@ P      = P_base × (1 + 0.2 × tanh(N / L))
 npm test
 ```
 
-`node --test`（無框架、無 watch）。共 **31 個測試**：M1 的 15 個（規格要求 10 個 + 5 個補充）
-＋ M2 的 16 個（REST / WebSocket）。
+`node --test`（無框架、無 watch）。共 **51 個測試**：M1 的 15 個（規格要求 10 個 + 5 個補充）
+＋ M2 的 16 個（REST / WebSocket）＋ M3 的 20 個（規則與離線報告）。
 
 ### M1（15 個）
 
@@ -269,14 +350,38 @@ npm test
 | A15 | WS：新事件廣播 `event`（且不含 `type` / `permanent_share`） | WS / §7.7 |
 | A16 | WS：強平只通知受影響的使用者 | WS |
 
+### M3（20 個，`test/rules.test.js`）
+
+| # | 測試 | 對應 contract |
+|---|------|--------------|
+| R1 | 每帳號最多 2 條啟用中規則（第 3 條 → `max_active_rules`；取消後可再建立；額度 per user） | M3 acceptance |
+| R2 | 觸發判定用 tick 的 last price；成交在**下一 tick**；一次性不重複觸發 | §6.3 / §10 |
+| R3a | 買進：下一 tick 價格高於觸發價才加 0.1% 滑價 | §6.3 / §10 |
+| R3b | 買進：下一 tick 價格低於觸發價 → 照該價成交 | §6.3 / §10 |
+| R3c | 賣出：下一 tick 價格低於觸發價才減 0.1%；高於則照價成交 | §6.3 / §10 |
+| R4 | 成交失敗 → 規則維持 `active` + `last_error`；通知每 5 分鐘最多一次 | §6.3 / §10 |
+| R5 | 強平暫停所有啟用中規則；手動重新啟用可恢復 | §6.3 / §10 |
+| R6 | 離線報告形狀（收入 / 淨值高低 / 觸發明細 / 是否強平） | §6.4 |
+| R6b | 報告記錄 SL 平倉 | §6.4 |
+| R6c | WS 連線會產生離線報告（`last_seen_tick` 隨連線更新） | §6.4 |
+| R7 | REST：`GET/POST/PATCH/DELETE /api/rules`（穩定原因字串） | REST |
+| R7b | `GET /api/state` 的 snapshot 含 `rules` | WS snapshot |
+| R8 | WS：`rule.upsert` / `rule.delete` / `rule.updated` / `rule.triggered` | WS |
+| R8b | WS：成交失敗 → `rule.skipped`（5 分鐘內不重複） | WS |
+| R9 | 觸發價離現價 < 0.05% → `trigger_too_close`（`confirm: true` 可建立） | §6.3 |
+| R10 | schema：M3 新增欄位與 `rule_events` 表（§6.2 v0.25 欄位不動） | §6.2 |
+| R10b | 遷移：既有 M2 schema 開啟後自動補上 M3 欄位 | 部署 |
+| R10c | 重啟後規則與規則事件都還在；規則開倉的 ledger `source='rule'` | §4.4 / §6.2 |
+| R11 | `POST /api/report/ack { user }` → `{ ok: true }`，`last_seen_tick` 前移 | UI 整合 |
+| R11b | WS `rule.upsert`：`data` 內的 `user` 欄位被忽略；頂層 `user` 不符仍拒絕 | UI 整合 |
+
 測試 8、8b 與全部 M2 測試需要 `better-sqlite3`；若原生模組不可用會自動 **skip**
 （M1 純邏輯測試仍會跑）。每個 M2 測試都使用**全新的暫存 DB**，且**不啟動真實 tick 迴圈**
 （`buildServer({ live: false })`），需要時間推進時由測試手動呼叫 `engine.tick()`。
 
-## 尚未包含（M3 範圍）
+## 尚未包含（M3 剩餘範圍）
 
 - Google 登入與 session（§6.1，M2 為臨時 `?user=` 認證）
-- 手機版（§7.3；M2 只做桌機）
-- 離線自動規則引擎與離線報告（§6.3、§6.4）
-- 條件開倉規則、平倉後自動再下單（§7.5）
-- 裝飾、排行榜、破產重整（post-alpha）
+- 手機版 UI（§7.3；M2 只做桌機）—— M3 **後端**已完成，前端由另一條 lane 處理
+- 條件平倉、時間到平倉、移動停損（§6.3，M3 只做條件開倉）
+- 排行榜、破產重整（post-alpha）

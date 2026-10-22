@@ -67,6 +67,13 @@ export const OU_THETA = 8e-6; // 均值回歸速度（/秒）
 export const OU_SIGMA = 1.4e-4; // 波動率（/√秒）
 export const DT = 1; // tick = 1 秒市場時間
 
+// ---------------------------------------------------------------- 離線自動規則（M3，§6.3）
+export const RULE_KIND = 'conditional_open'; // M3 只有一種規則：條件開倉
+export const MAX_ACTIVE_RULES = 2; // 每帳號最多 2 條「啟用中」條件開倉規則
+export const RULE_SLIPPAGE = 0.001; // 條件開倉滑價 0.1%（只在變差時加）
+export const RULE_TRIGGER_TOO_CLOSE = 0.0005; // 觸發價與現價差 < 0.05% → 拒絕（會立刻成交）
+export const RULE_NOTIFY_COOLDOWN_TICKS = 300; // 同一規則的通知間隔：5 分鐘 = 300 ticks
+
 // ---------------------------------------------------------------- 事件（§4.2）
 // meanIntervalSec：指數間隔（結構性平均間隔）的均值（秒）
 export const EVENT_TYPES = ['structural', 'major', 'news'];
@@ -159,6 +166,11 @@ export const CONFIG = Object.freeze({
   LIQUIDITY_WINDOW_MINUTES,
   MAX_ORDER_NOTIONAL_MULTIPLE,
   MAX_USER_NOTIONAL_MULTIPLE,
+  RULE_KIND,
+  MAX_ACTIVE_RULES,
+  RULE_SLIPPAGE,
+  RULE_TRIGGER_TOO_CLOSE,
+  RULE_NOTIFY_COOLDOWN_TICKS,
   OU_THETA,
   OU_SIGMA,
   DT,
