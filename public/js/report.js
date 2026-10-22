@@ -2,8 +2,8 @@
    顯示離線時長／收益／淨值起迄高低／觸發紀錄（open/sl/tp/skipped/liquidation）、
    liquidated 紅色警示。關閉時可選 POST /api/report/ack（contract 標 optional）。 */
 
-import { state } from './state.js?v=10';
-import { $, el, fmtA, fmtA1, fmtPrice, api } from './util.js?v=10';
+import { state } from './state.js?v=11';
+import { $, el, fmtA, fmtA1, fmtPrice, api } from './util.js?v=11';
 
 let restApi = null;
 
@@ -54,7 +54,7 @@ function renderReport(r) {
 
   const inc = $('#rpIncome');
   const incMilli = r.income_milli ?? 0;
-  inc.textContent = `${incMilli > 0 ? '+' : ''}${fmtA1(incMilli)} A`;
+  inc.textContent = `${incMilli > 0 ? '+' : ''}${fmtA1(incMilli)} 楓幣`;
   inc.className = `mono ${incMilli > 0 ? 'up' : incMilli < 0 ? 'down' : 'dim'}`;
 
   $('#rpEqStart').textContent = fmtA(r.equity_start_milli);
@@ -86,7 +86,7 @@ function renderReport(r) {
       );
       if (t.pnl_milli != null) {
         const pnl = el('b', `rp-pnl mono ${t.pnl_milli > 0 ? 'up' : t.pnl_milli < 0 ? 'down' : 'dim'}`,
-          `${t.pnl_milli > 0 ? '+' : ''}${fmtA1(t.pnl_milli)} A`);
+          `${t.pnl_milli > 0 ? '+' : ''}${fmtA1(t.pnl_milli)} 楓幣`);
         mid.append(pnl);
       }
     }

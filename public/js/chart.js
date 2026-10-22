@@ -1,8 +1,8 @@
 /* chart.js — Canvas 2D 走勢圖（主圖）＋全服淨部位副圖。
    redraw 條件：tick 常壓送、指標移動、resize；形成 K 只在 tick 級別更新。 */
 
-import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=10';
-import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=10';
+import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=11';
+import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=11';
 
 const COLORS = {
   grid: '#161c28',
@@ -322,7 +322,7 @@ export class Chart {
     ctx.fillText(fmtCompactA(Math.round(maxV)), w - padR + 8, 10);
     ctx.fillText(fmtCompactA(Math.round(-maxV)), w - padR + 8, h - 3);
     ctx.fillStyle = COLORS.dim;
-    ctx.fillText('A', w - padR + 8, h / 2 + 3.5);
+    ctx.fillText('楓幣', w - padR + 8, h / 2 + 3.5);
 
     const n = arr.length;
     const bw = Math.max(1.5, (w - padR) / n - 1);

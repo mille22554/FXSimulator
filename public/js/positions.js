@@ -1,7 +1,7 @@
 /* positions.js — 底部持倉卡片列：方向／名目／進場／槓桿／浮動損益／強平／平倉 */
 
-import { state } from './state.js?v=10';
-import { $, el, fmtA, fmtA1, fmtPrice } from './util.js?v=10';
+import { state } from './state.js?v=11';
+import { $, el, fmtA, fmtA1, fmtPrice } from './util.js?v=11';
 
 export function initPositions(onClose) {
   renderPositions();
@@ -48,7 +48,7 @@ export function renderPositions() {
 
     const r3 = el('div', 'pos-row3');
     const pnlClass = p.pnl_milli > 0 ? 'up' : p.pnl_milli < 0 ? 'down' : 'dim';
-    // 浮動損益：A 幣、1 位小數、帶正負號
+    // 浮動損益：楓幣、1 位小數、帶正負號
     const pnl = el('b', `pos-pnl mono ${pnlClass}`);
     pnl.textContent = `${p.pnl_milli > 0 ? '+' : ''}${fmtA1(p.pnl_milli)}`;
     const liqs = el('span', 'pos-liq');

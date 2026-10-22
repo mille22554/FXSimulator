@@ -2,17 +2,17 @@
    snapshot 接管狀態 → tick 1Hz 重繪、下單送出（WS order.open／order.close）→
    toast／橫幅／連線狀態。未登入一律不初始化交易 WS。 */
 
-import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js?v=10';
-import { createTransport } from './ws.js?v=10';
-import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js?v=10';
-import { Chart } from './chart.js?v=10';
-import { initOrderPanel, refreshOnTick } from './order.js?v=10';
-import { initPositions, renderPositions } from './positions.js?v=10';
-import { initNews, renderNews, maybeBanner } from './news.js?v=10';
-import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js?v=10';
-import { initReport, initReportApi, fetchAndShowReport } from './report.js?v=10';
-import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js?v=10';
-import { initUpdateWatch } from './update.js?v=10';
+import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js?v=11';
+import { createTransport } from './ws.js?v=11';
+import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js?v=11';
+import { Chart } from './chart.js?v=11';
+import { initOrderPanel, refreshOnTick } from './order.js?v=11';
+import { initPositions, renderPositions } from './positions.js?v=11';
+import { initNews, renderNews, maybeBanner } from './news.js?v=11';
+import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js?v=11';
+import { initReport, initReportApi, fetchAndShowReport } from './report.js?v=11';
+import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js?v=11';
+import { initUpdateWatch } from './update.js?v=11';
 
 const params = new URLSearchParams(location.search);
 state.isMock = params.get('mock') === '1';
@@ -34,7 +34,7 @@ const MOCK_CONFIG = {
 const REJECT_TEXT = {
   insufficient_balance: '餘額不足',
   max_positions: '持倉已滿 5 張',
-  min_notional: '低於最小名目 10,000 A',
+  min_notional: '低於最小名目 10,000 楓幣',
   max_notional: '超過名目上限',
   debt_no_open: '負債狀態無法開單',
   invalid_leverage: '無效槓桿',
@@ -191,12 +191,12 @@ function handleMessage(m) {
       // contract：order.close 的回覆帶 exit_price_e4 / pnl_milli
       if (d.exit_price_e4 != null) {
         const pnl = d.pnl_milli;
-        toast('ok', `平倉成交 @ ${fmtPrice(d.exit_price_e4)}，損益 ${pnl > 0 ? '+' : ''}${fmtA1(pnl)} A`);
+        toast('ok', `平倉成交 @ ${fmtPrice(d.exit_price_e4)}，損益 ${pnl > 0 ? '+' : ''}${fmtA1(pnl)} 楓幣`);
       } else {
         const side = d.side === 'long' ? '買入' : '賣出';
         // contract：超過名目上限可能 ok:true + fill.truncated:true（已截斷）
         const trunc = fill.truncated || d.truncated ? '，已依名目上限截斷' : '';
-        toast('ok', `${side}成交 ${fmtA(fill.notional_milli ?? 0)} A @ ${fmtPrice(fill.price_e4)}${trunc}`);
+        toast('ok', `${side}成交 ${fmtA(fill.notional_milli ?? 0)} 楓幣 @ ${fmtPrice(fill.price_e4)}${trunc}`);
       }
       renderAll();
       break;
@@ -208,7 +208,7 @@ function handleMessage(m) {
     }
     case 'liquidation': {
       const d = m.data;
-      toast('liq', `強平：持倉 #${d.position_id} 於 ${fmtPrice(d.price_e4)} 觸發，損失 ${fmtA1(d.pnl_milli)} A`);
+      toast('liq', `強平：持倉 #${d.position_id} 於 ${fmtPrice(d.price_e4)} 觸發，損失 ${fmtA1(d.pnl_milli)} 楓幣`);
       renderAll();
       break;
     }

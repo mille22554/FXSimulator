@@ -16,7 +16,7 @@ export function el(tag, cls, text) {
 
 /* ── 金額 ── */
 
-/** 整數 A＋千分位（餘額、名目）。milli-A 輸入。 */
+/** 整數楓幣＋千分位（餘額、名目）。milli-A 輸入。 */
 export function fmtA(milli) {
   if (milli == null || Number.isNaN(milli)) return '—';
   return Math.round(milli / 1000).toLocaleString('en-US');
@@ -28,7 +28,7 @@ export function fmtA1(milli) {
   return (milli / 1000).toFixed(1);
 }
 
-/** K／M 縮寫（淨部位、大名目），輸入整數 A。 */
+/** K／M 縮寫（淨部位、大名目），輸入整數楓幣。 */
 export function fmtCompactA(a) {
   const sign = a < 0 ? '−' : '+';
   const v = Math.abs(a);

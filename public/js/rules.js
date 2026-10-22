@@ -3,8 +3,8 @@
    rule.upsert / rule.delete（回覆 rule.updated / rule.rejected）。
    觸發價與現價距離 <0.05% → 警示「會立刻成交；後端會以 trigger_too_close 拒絕。 */
 
-import { state } from './state.js?v=10';
-import { $, $$, el, fmtA, fmtPrice, priceE4, api } from './util.js?v=10';
+import { state } from './state.js?v=11';
+import { $, $$, el, fmtA, fmtPrice, priceE4, api } from './util.js?v=11';
 
 const TRIGGER_TOO_CLOSE_PCT = 0.0005; // 0.05%
 
@@ -211,7 +211,7 @@ export function renderRules() {
 
     const row2 = el('div', 'rule-row2');
     const bits = [
-      `保證金 ${fmtA((r.margin_a ?? 0) * 1000)} A`,
+      `保證金 ${fmtA((r.margin_a ?? 0) * 1000)} 楓幣`,
       `${r.leverage}×`,
     ];
     if (r.sl_pct != null) bits.push(`SL ${r.sl_pct}%`);
@@ -335,10 +335,10 @@ function refreshTriggerHint() {
 
 function refreshFormCalc() {
   const m = Math.max(0, Math.round(Number($('#ruleMargin').value) || 0));
-  $('#ruleNotional').textContent = `名目 ${(m * formLev).toLocaleString('en-US')} A`;
+  $('#ruleNotional').textContent = `名目 ${(m * formLev).toLocaleString('en-US')} 楓幣`;
   const minMargin = state.config && state.config.min_margin_a ? state.config.min_margin_a[formLev] : 1000;
   const avail = Math.max(0, Math.floor((state.account.available_milli || 0) / 1000));
-  $('#ruleMarginHint').textContent = `此槓桿最少 ${minMargin.toLocaleString('en-US')} A · 可用 ${avail.toLocaleString('en-US')} A`;
+  $('#ruleMarginHint').textContent = `此槓桿最少 ${minMargin.toLocaleString('en-US')} 楓幣 · 可用 ${avail.toLocaleString('en-US')} 楓幣`;
 }
 
 function openFormNote(text, isErr) {

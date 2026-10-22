@@ -2,8 +2,8 @@
    即時預覽（名目／預估成交／強平／持倉費／最大損失）、
    SL/TP（上限＝強平距離×0.9）、自動再下單計數、300ms debounce 送出。 */
 
-import { state } from './state.js?v=10';
-import { $, $$, el, fmtA, fmtFee, fmtPrice, fmtPct, pctSigned, priceE4 } from './util.js?v=10';
+import { state } from './state.js?v=11';
+import { $, $$, el, fmtA, fmtFee, fmtPrice, fmtPct, pctSigned, priceE4 } from './util.js?v=11';
 
 const cfg = () => state.config;
 
@@ -126,7 +126,7 @@ export function clampMargin() {
     note.textContent = maxMarginA < minMargin
       ? '名目上限不足，無法以此槓桿開單。'
       : availableA < minMargin
-        ? `此槓桿最少需 ${minMargin.toLocaleString('en-US')} A`
+        ? `此槓桿最少需 ${minMargin.toLocaleString('en-US')} 楓幣`
         : '可用保證金不足，無法開新倉。';
   } else note.hidden = true;
   $('#btnBuy').disabled = disabled;
@@ -161,7 +161,7 @@ export function renderPreview() {
     return;
   }
 
-  $('#pvNotional').textContent = `${fmtA(marginA * lev * 1000)} A`;
+  $('#pvNotional').textContent = `${fmtA(marginA * lev * 1000)} 楓幣`;
 
   $('#pvFillBuy').textContent = fmtPrice(priceE4(pBuy.fill));
   $('#pvFillSell').textContent = fmtPrice(priceE4(pSell.fill));
@@ -173,7 +173,7 @@ export function renderPreview() {
   $('#pvFeeBuy').textContent = fmtFee(pBuy.feePerHour);
   $('#pvFeeSell').textContent = fmtFee(pSell.feePerHour);
 
-  $('#pvMargin').textContent = `${fmtA(marginA * 1000)} A`;
+  $('#pvMargin').textContent = `${fmtA(marginA * 1000)} 楓幣`;
 
   // SL/TP 上限：強平距離 × 0.9；欄位單位＝% 數字（0.5 = 0.5%，contract 定案）
   const maxPctInput = pBuy.liqDist * 100 * 0.9;
@@ -209,7 +209,7 @@ export function renderPreview() {
   }
 
   // 面板內即時顯示可用（規格 §7.2 佈局：可用 X A）
-  $('#marginHint').textContent = `可用 ${fmtA(availableA * 1000)} A`;
+  $('#marginHint').textContent = `可用 ${fmtA(availableA * 1000)} 楓幣`;
 }
 
 /* ── 送出：不做二次確認；按鈕 300ms debounce ── */
