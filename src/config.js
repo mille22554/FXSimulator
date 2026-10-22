@@ -54,7 +54,12 @@ export const MIN_SL_DISTANCE = 0.0005; // 最小停損距離 0.05%
 export const SL_MAX_LIQ_FACTOR = 0.9; // 停損上限 = 強平距離 × 0.9
 
 // ---------------------------------------------------------------- 價格影響（§4.1）
-export const IMPACT_K = 1.0; // 價格影響係數
+// 影響 = 0.2 × tanh(IMPACT_K × N / L)，N = 全服淨多頭名目、L = max(3M, 0.001×24h 量)
+// 2026-10-22 重新校準：原本 K=1.0，單筆 320 萬名目（160K 保證金 ×20）→ +15.8%，
+//   等同開倉即被自己的衝擊打到接近爆倉。K=0.01 後：
+//   320 萬 → 0.21%；單筆上限 2L（600 萬）→ 0.40%；單人上限 4L（1,200 萬）→ 0.80%；
+//   全服淨 1.2 億 → 7.6%；±20% 上限需淨名目 9 億（實務不可達，僅作數學邊界）。
+export const IMPACT_K = 0.01; // 價格影響係數
 export const IMPACT_SATURATION = 0.2; // 飽和係數 → 單邊最大 ±20%
 export const LIQUIDITY_L_MIN = 3_000_000; // L 下限（A）
 export const LIQUIDITY_VOLUME_FACTOR = 0.001; // L = 0.001 × 24h 名目成交量

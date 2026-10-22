@@ -2,8 +2,8 @@
    即時預覽（名目／預估成交／強平／持倉費／最大損失）、
    SL/TP（絕對價格輸入，送整數 e4）、自動再下單計數、300ms debounce 送出。 */
 
-import { state } from './state.js?v=12';
-import { $, $$, el, fmtA, fmtFee, fmtPrice, fmtPct, pctSigned, priceE4 } from './util.js?v=12';
+import { state } from './state.js?v=13';
+import { $, $$, el, fmtA, fmtFee, fmtPrice, fmtPct, pctSigned, priceE4 } from './util.js?v=13';
 
 const cfg = () => state.config;
 

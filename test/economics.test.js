@@ -114,6 +114,20 @@ test('4. 自推自賺：用最大名目把價格推高再平倉，淨損益 < 0'
   assert.ok(after < before);
 });
 
+test('4b. 價格影響校準：320 萬名目（160K 保證金 ×20）衝擊 < 0.5%', () => {
+  const engine = newEngine();
+
+  // 單筆常見大單：3.2M 名目（L 下限 3M 的 1.07 倍）
+  engine.market.setNetNotional(3_200_000);
+  const impact = engine.market.impactMultiplier() - 1;
+  assert.ok(impact > 0.001, `衝擊 ${impact} 應仍可感知（>0.1%）`);
+  assert.ok(impact < 0.005, `衝擊 ${impact} 應 <0.5%（原 K=1 時為 15.8%）`);
+
+  // 單筆名目上限（2 × L = 6M）也不得超過 1%
+  engine.market.setNetNotional(6_000_000);
+  assert.ok(engine.market.impactMultiplier() - 1 < 0.01);
+});
+
 test('5. 兩個玩家對做（多空同額），價格影響互相抵銷', () => {
   const engine = newEngine();
   const base = engine.market.basePrice;
