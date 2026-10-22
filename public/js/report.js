@@ -2,8 +2,8 @@
    顯示離線時長／收益／淨值起迄高低／觸發紀錄（open/sl/tp/skipped/liquidation）、
    liquidated 紅色警示。關閉時可選 POST /api/report/ack（contract 標 optional）。 */
 
-import { state } from './state.js';
-import { $, el, fmtA, fmtA1, fmtPrice, api } from './util.js';
+import { state } from './state.js?v=6';
+import { $, el, fmtA, fmtA1, fmtPrice, api } from './util.js?v=6';
 
 let restApi = null;
 

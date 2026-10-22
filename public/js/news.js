@@ -1,8 +1,8 @@
 /* news.js — 桌面右側可收合新聞看板：HH:MM＋標題，依時間列出全部事件；
    重大事件（|jump| ≥1.5%）跳中性事件橫幅（4s 滑入）；點擊定位圖表時間。 */
 
-import { state, eventTimeMs } from './state.js';
-import { $, el, fmtHHMM } from './util.js';
+import { state, eventTimeMs } from './state.js?v=6';
+import { $, el, fmtHHMM } from './util.js?v=6';
 
 let bannerTimer = null;
 let lastEventId = null;

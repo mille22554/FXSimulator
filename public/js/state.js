@@ -188,13 +188,16 @@ export function chartData() {
   const mode = state.ui.chartMode;
   const candles = state.candles;
   if (mode === 'line') {
-    const pts = candles
+    const raw = candles
       .filter(c => c.close_e4 != null)
       .map(c => ({ t: candleTimeMS(c), v: c.close_e4 }));
     if (state.market.price_e4 != null) {
-      pts.push({ t: state.serverNow, v: state.market.price_e4, live: true });
+      raw.push({ t: state.serverNow, v: state.market.price_e4, live: true });
     }
-    return { points: pts };
+    // 以時間排序並去重：避免舊／新 K 混用時折線來回折，看起來像好幾條線
+    const byT = new Map();
+    for (const p of raw) byT.set(p.t, p);
+    return { points: [...byT.values()].sort((a, b) => a.t - b.t) };
   }
   // K 線：1 或 5 分聚合
   const src = [...candles];
@@ -212,9 +215,9 @@ export function chartData() {
         g.close_e4 = c.close_e4;
       }
     }
-    return { candles5: [...groups.values()] };
+    return { candles5: [...groups.values()].sort((a, b) => a.t - b.t) };
   }
-  return { candles1: src.slice(-600).map(c => ({ ...c, t: candleTimeMS(c) })) };
+  return { candles1: src.map(c => ({ ...c, t: candleTimeMS(c) })).sort((a, b) => a.t - b.t).slice(-600) };
 }
 
 export function candleTimeMS(c, i = 0) {

@@ -2,16 +2,16 @@
    snapshot 接管狀態 → tick 1Hz 重繪、下單送出（WS order.open／order.close）→
    toast／橫幅／連線狀態。未登入一律不初始化交易 WS。 */
 
-import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js';
-import { createTransport } from './ws.js';
-import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js';
-import { Chart } from './chart.js';
-import { initOrderPanel, refreshOnTick } from './order.js';
-import { initPositions, renderPositions } from './positions.js';
-import { initNews, renderNews, maybeBanner } from './news.js?v=4';
-import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js';
-import { initReport, initReportApi, fetchAndShowReport } from './report.js';
-import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js';
+import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js?v=6';
+import { createTransport } from './ws.js?v=6';
+import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js?v=6';
+import { Chart } from './chart.js?v=6';
+import { initOrderPanel, refreshOnTick } from './order.js?v=6';
+import { initPositions, renderPositions } from './positions.js?v=6';
+import { initNews, renderNews, maybeBanner } from './news.js?v=6';
+import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js?v=6';
+import { initReport, initReportApi, fetchAndShowReport } from './report.js?v=6';
+import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js?v=6';
 
 const params = new URLSearchParams(location.search);
 state.isMock = params.get('mock') === '1';
