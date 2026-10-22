@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS rules (
   leverage          INTEGER NOT NULL DEFAULT 10,
   sl_pct            REAL,
   tp_pct            REAL,
+  -- 價格制（§7.5；sl_pct/tp_pct 僅保留給舊資料換算）
+  sl_price_e4       INTEGER,
+  tp_price_e4       INTEGER,
   status            TEXT NOT NULL DEFAULT 'active',
   armed_side        TEXT,
   last_error        TEXT,
@@ -190,6 +193,8 @@ export const MIGRATIONS = {
     leverage: 'INTEGER NOT NULL DEFAULT 10',
     sl_pct: 'REAL',
     tp_pct: 'REAL',
+    sl_price_e4: 'INTEGER',
+    tp_price_e4: 'INTEGER',
     status: "TEXT NOT NULL DEFAULT 'active'",
     armed_side: 'TEXT',
     last_error: 'TEXT',
@@ -480,16 +485,19 @@ class SqliteStore {
       ),
       insertRule: db.prepare(
         `INSERT INTO rules (id, user_id, kind, params_json, enabled, created_tick, triggered_tick,
-                            side, trigger_price_e4, margin_a, leverage, sl_pct, tp_pct, status,
+                            side, trigger_price_e4, margin_a, leverage, sl_pct, tp_pct,
+                            sl_price_e4, tp_price_e4, status,
                             armed_side, last_error, paused_reason, last_notified_tick, pending_tick, position_id)
          VALUES (@id, @user_id, @kind, @params_json, @enabled, @created_tick, @triggered_tick,
-                 @side, @trigger_price_e4, @margin_a, @leverage, @sl_pct, @tp_pct, @status,
+                 @side, @trigger_price_e4, @margin_a, @leverage, @sl_pct, @tp_pct,
+                 @sl_price_e4, @tp_price_e4, @status,
                  @armed_side, @last_error, @paused_reason, @last_notified_tick, @pending_tick, @position_id)`,
       ),
       updateRule: db.prepare(
         `UPDATE rules SET enabled=@enabled, triggered_tick=@triggered_tick, side=@side,
            trigger_price_e4=@trigger_price_e4, margin_a=@margin_a, leverage=@leverage,
-           sl_pct=@sl_pct, tp_pct=@tp_pct, status=@status, armed_side=@armed_side,
+           sl_pct=@sl_pct, tp_pct=@tp_pct, sl_price_e4=@sl_price_e4, tp_price_e4=@tp_price_e4,
+           status=@status, armed_side=@armed_side,
            last_error=@last_error, paused_reason=@paused_reason, last_notified_tick=@last_notified_tick,
            pending_tick=@pending_tick, position_id=@position_id, params_json=@params_json
          WHERE id=@id`,
@@ -925,6 +933,8 @@ function ruleRow(rule) {
     leverage: rule.leverage,
     sl_pct: rule.slPct ?? null,
     tp_pct: rule.tpPct ?? null,
+    sl_price_e4: rule.slPriceE4 ?? null,
+    tp_price_e4: rule.tpPriceE4 ?? null,
     status: rule.status,
     armed_side: rule.armedSide ?? null,
     last_error: rule.lastError ?? null,
@@ -937,6 +947,9 @@ function ruleRow(rule) {
 
 /** SQLite row → 規則物件 */
 export function rowToRule(row) {
+  // 價格制：新欄位優先；舊資料（只有 sl_pct/tp_pct）在讀取時換算成價格
+  const legacySl = legacyStopPriceE4(row.trigger_price_e4, row.sl_pct, row.side, 'sl');
+  const legacyTp = legacyStopPriceE4(row.trigger_price_e4, row.tp_pct, row.side, 'tp');
   return {
     id: row.id,
     userId: row.user_id,
@@ -949,8 +962,11 @@ export function rowToRule(row) {
     triggerPriceE4: row.trigger_price_e4,
     marginA: row.margin_a,
     leverage: row.leverage,
+    // 舊百分比欄位（0.5 = 0.5%）：只作為 fallback 顯示，不再用於計算
     slPct: row.sl_pct ?? null,
     tpPct: row.tp_pct ?? null,
+    slPriceE4: row.sl_price_e4 ?? legacySl,
+    tpPriceE4: row.tp_price_e4 ?? legacyTp,
     status: row.status,
     armedSide: row.armed_side ?? null,
     lastError: row.last_error ?? null,
@@ -959,6 +975,25 @@ export function rowToRule(row) {
     pendingTick: row.pending_tick ?? null,
     positionId: row.position_id ?? null,
   };
+}
+
+/**
+ * 舊百分比 → 價格（e4）。只在舊資料列（沒有 *_price_e4）時使用。
+ * sl_pct / tp_pct 的單位是**百分比數字**（0.5 = 0.5%），以觸發價為基準換算。
+ * @returns {number|null}
+ */
+function legacyStopPriceE4(refE4, pctPercent, side, kind) {
+  const ref = Number(refE4);
+  const pct = Number(pctPercent);
+  if (!Number.isFinite(ref) || ref <= 0) return null;
+  if (!Number.isFinite(pct) || pct <= 0) return null;
+  const fraction = pct / 100;
+  const long = side === 'long';
+  // 停損在虧損方向、停利在獲利方向
+  const below = kind === 'sl' ? long : !long;
+  const price = below ? ref * (1 - fraction) : ref * (1 + fraction);
+  const e4 = Math.round(price);
+  return e4 > 0 ? e4 : null;
 }
 
 function safeJson(text) {

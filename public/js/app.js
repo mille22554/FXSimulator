@@ -2,17 +2,17 @@
    snapshot 接管狀態 → tick 1Hz 重繪、下單送出（WS order.open／order.close）→
    toast／橫幅／連線狀態。未登入一律不初始化交易 WS。 */
 
-import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js?v=11';
-import { createTransport } from './ws.js?v=11';
-import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js?v=11';
-import { Chart } from './chart.js?v=11';
-import { initOrderPanel, refreshOnTick } from './order.js?v=11';
-import { initPositions, renderPositions } from './positions.js?v=11';
-import { initNews, renderNews, maybeBanner } from './news.js?v=11';
-import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js?v=11';
-import { initReport, initReportApi, fetchAndShowReport } from './report.js?v=11';
-import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js?v=11';
-import { initUpdateWatch } from './update.js?v=11';
+import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js?v=12';
+import { createTransport } from './ws.js?v=12';
+import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js?v=12';
+import { Chart } from './chart.js?v=12';
+import { initOrderPanel, refreshOnTick } from './order.js?v=12';
+import { initPositions, renderPositions } from './positions.js?v=12';
+import { initNews, renderNews, maybeBanner } from './news.js?v=12';
+import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js?v=12';
+import { initReport, initReportApi, fetchAndShowReport } from './report.js?v=12';
+import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js?v=12';
+import { initUpdateWatch } from './update.js?v=12';
 
 const params = new URLSearchParams(location.search);
 state.isMock = params.get('mock') === '1';
@@ -41,6 +41,15 @@ const REJECT_TEXT = {
   invalid_side: '無效方向',
   not_found: '找不到該持倉（可能已平倉）',
   market_paused: '市場暫停',
+  sl_invalid: '停損價無效',
+  tp_invalid: '停利價無效',
+  sl_wrong_side: '停損價方向錯誤（買入需低於現價、賣出需高於現價）',
+  tp_wrong_side: '停利價方向錯誤（買入需高於現價、賣出需低於現價）',
+  sl_too_close: '停損價太近（至少 0.05%）',
+  sl_beyond_liq: '停損價超過強平距離',
+  tp_too_close: '停利價太近（至少 0.05%）',
+  sl_pct_removed: '此頁版本過舊，請重新整理（停損停利已改為價格）',
+  tp_pct_removed: '此頁版本過舊，請重新整理（停損停利已改為價格）',
 };
 
 function toast(kind, text) {

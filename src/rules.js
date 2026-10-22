@@ -30,9 +30,9 @@ import {
   RULE_SLIPPAGE,
   RULE_TRIGGER_TOO_CLOSE,
 } from './config.js';
-import { minMarginForLeverage } from './account.js';
+import { minMarginForLeverage, liquidationDistance } from './account.js';
 import { priceToE4 } from './money.js';
-import { resolvePct } from './pct.js';
+import { parseStopPrice, pctOnlyGiven, resolveStops } from './stops.js';
 
 /** 規則狀態（contract：`active|paused|triggered|cancelled`） */
 export const RULE_STATUS = Object.freeze({
@@ -60,7 +60,21 @@ export const RULE_REASONS = Object.freeze({
   NOT_REENABLEABLE: 'rule_not_active',
   INVALID_SL: 'sl_invalid',
   INVALID_TP: 'tp_invalid',
+  // 價格制：舊的百分比欄位已移除（前端舊頁面需重整）
+  SL_PCT_REMOVED: 'sl_pct_removed',
+  TP_PCT_REMOVED: 'tp_pct_removed',
 });
+
+/**
+ * `resolveStops` 的失敗原因 → 規則的穩定原因字串。
+ * `sl_invalid` / `tp_invalid` 沿用既有文案；其餘（方向錯誤 / 距離過近 / 超過強平距離）
+ * 原樣回傳，讓前端能區分「錯在哪裡」。
+ */
+function mapStopReason(reason) {
+  if (reason === 'sl_invalid') return RULE_REASONS.INVALID_SL;
+  if (reason === 'tp_invalid') return RULE_REASONS.INVALID_TP;
+  return reason;
+}
 
 /** 引擎的開倉失敗原因 → contract 的穩定跳過原因 */
 const SKIP_REASON_MAP = Object.freeze({
@@ -88,8 +102,12 @@ export function ruleJson(rule) {
     trigger_price_e4: rule.triggerPriceE4,
     margin_a: rule.marginA,
     leverage: rule.leverage,
-    sl_pct: rule.slPct ?? null,
-    tp_pct: rule.tpPct ?? null,
+    // 價格制（使用者輸入的絕對價位）
+    sl_price_e4: rule.slPriceE4 ?? null,
+    tp_price_e4: rule.tpPriceE4 ?? null,
+    // 舊百分比制已移除：欄位保留但恆為 null（相容舊前端文案）
+    sl_pct: null,
+    tp_pct: null,
     enabled: !!rule.enabled,
     status: rule.status,
     armed_side: rule.armedSide ?? null,
@@ -162,7 +180,7 @@ export class RuleManager {
   /**
    * 建立一條條件開倉規則。
    * @param {number} userId
-   * @param {object} input { side, trigger_price_e4, margin_a, leverage, sl_pct?, tp_pct?, confirm? }
+   * @param {object} input { side, trigger_price_e4, margin_a, leverage, sl_price_e4?, tp_price_e4?, confirm? }
    * @param {object} meta { requestId? }（WS 請求的 request_id，會帶在 `rule.updated` 裡）
    * @returns {{ok:true, rule:object}|{ok:false, reason:string}}
    */
@@ -196,10 +214,29 @@ export class RuleManager {
       return { ok: false, reason: RULE_REASONS.INVALID_TRIGGER };
     }
 
-    const sl = resolvePct(input.sl_pct ?? input.slPct, { kind: 'sl', leverage });
-    if (sl.error) return { ok: false, reason: RULE_REASONS.INVALID_SL };
-    const tp = resolvePct(input.tp_pct ?? input.tpPct, { kind: 'tp', leverage });
-    if (tp.error) return { ok: false, reason: RULE_REASONS.INVALID_TP };
+    // 停損 / 停利：**價格制**（整數 e4 價位）；舊的百分比欄位已移除
+    const slPriceRaw = input.sl_price_e4 ?? input.slPriceE4;
+    const tpPriceRaw = input.tp_price_e4 ?? input.tpPriceE4;
+    if (pctOnlyGiven(input.sl_pct ?? input.slPct, slPriceRaw)) {
+      return { ok: false, reason: RULE_REASONS.SL_PCT_REMOVED };
+    }
+    if (pctOnlyGiven(input.tp_pct ?? input.tpPct, tpPriceRaw)) {
+      return { ok: false, reason: RULE_REASONS.TP_PCT_REMOVED };
+    }
+    const slParsed = parseStopPrice(slPriceRaw);
+    if (slParsed.error) return { ok: false, reason: RULE_REASONS.INVALID_SL };
+    const tpParsed = parseStopPrice(tpPriceRaw);
+    if (tpParsed.error) return { ok: false, reason: RULE_REASONS.INVALID_TP };
+
+    // 驗證基準：**參考價 = 規則的觸發價**（建立／修改時都用它）
+    const stops = resolveStops({
+      slPriceE4: slParsed.value,
+      tpPriceE4: tpParsed.value,
+      side,
+      refPriceE4: triggerPriceE4,
+      liqDist: liquidationDistance(leverage),
+    });
+    if (!stops.ok) return { ok: false, reason: mapStopReason(stops.reason) };
 
     const priceE4 = priceToE4(engine.market.price);
     // 觸發價已在現價（或差 < 0.05%）→ UI 警告「會立刻成交」，伺服器預設拒絕；
@@ -229,9 +266,12 @@ export class RuleManager {
       triggerPriceE4,
       marginA,
       leverage,
-      // 以「百分比數字」儲存（0.5 = 0.5%），與 API 輸出一致
-      slPct: sl.value != null ? sl.value * 100 : null,
-      tpPct: tp.value != null ? tp.value * 100 : null,
+      // **價格制**：使用者輸入的絕對價位（e4 整數），原樣儲存、成交時原樣帶入
+      slPriceE4: stops.slPriceE4,
+      tpPriceE4: stops.tpPriceE4,
+      // 舊百分比制已移除 → 恆為 null
+      slPct: null,
+      tpPct: null,
       enabled: true,
       status: RULE_STATUS.ACTIVE,
       armedSide: triggerPriceE4 > priceE4 ? 'above' : 'below',
@@ -247,8 +287,8 @@ export class RuleManager {
         trigger_price_e4: triggerPriceE4,
         margin_a: marginA,
         leverage,
-        sl_pct: sl.value != null ? sl.value * 100 : null,
-        tp_pct: tp.value != null ? tp.value * 100 : null,
+        sl_price_e4: stops.slPriceE4,
+        tp_price_e4: stops.tpPriceE4,
       },
     };
 
@@ -260,7 +300,7 @@ export class RuleManager {
 
   /**
    * 編輯規則（啟用／停用 或 改參數）。
-   * @param {object} patch { enabled?, side?, trigger_price_e4?, margin_a?, leverage?, sl_pct?, tp_pct? }
+   * @param {object} patch { enabled?, side?, trigger_price_e4?, margin_a?, leverage?, sl_price_e4?, tp_price_e4? }
    */
   updateRule(userId, id, patch = {}, meta = {}) {
     const rule = this.get(id);
@@ -289,7 +329,15 @@ export class RuleManager {
     }
 
     // ---- 參數 ----
-    const hasParams = ['side', 'trigger_price_e4', 'margin_a', 'leverage', 'sl_pct', 'tp_pct']
+    // 舊百分比欄位：只要 patch 帶了 pct 又沒帶對應價格 → 明確拒絕（舊頁面需重整）
+    if (patch.sl_price_e4 === undefined && (patch.sl_pct ?? patch.slPct) != null) {
+      return { ok: false, reason: RULE_REASONS.SL_PCT_REMOVED };
+    }
+    if (patch.tp_price_e4 === undefined && (patch.tp_pct ?? patch.tpPct) != null) {
+      return { ok: false, reason: RULE_REASONS.TP_PCT_REMOVED };
+    }
+
+    const hasParams = ['side', 'trigger_price_e4', 'margin_a', 'leverage', 'sl_price_e4', 'tp_price_e4']
       .some((k) => patch[k] !== undefined);
     if (hasParams) {
       const engine = this.engine;
@@ -312,12 +360,21 @@ export class RuleManager {
       if (!Number.isInteger(triggerPriceE4) || triggerPriceE4 <= 0) {
         return { ok: false, reason: RULE_REASONS.INVALID_TRIGGER };
       }
-      const slRaw = patch.sl_pct !== undefined ? patch.sl_pct : rule.slPct;
-      const tpRaw = patch.tp_pct !== undefined ? patch.tp_pct : rule.tpPct;
-      const sl = resolvePct(slRaw, { kind: 'sl', leverage });
-      if (sl.error) return { ok: false, reason: RULE_REASONS.INVALID_SL };
-      const tp = resolvePct(tpRaw, { kind: 'tp', leverage });
-      if (tp.error) return { ok: false, reason: RULE_REASONS.INVALID_TP };
+      // 價格制：patch 沒帶 → 沿用規則上的價格；明確帶 null → 清除
+      const slRaw = patch.sl_price_e4 !== undefined ? patch.sl_price_e4 : rule.slPriceE4;
+      const tpRaw = patch.tp_price_e4 !== undefined ? patch.tp_price_e4 : rule.tpPriceE4;
+      const slParsed = parseStopPrice(slRaw);
+      if (slParsed.error) return { ok: false, reason: RULE_REASONS.INVALID_SL };
+      const tpParsed = parseStopPrice(tpRaw);
+      if (tpParsed.error) return { ok: false, reason: RULE_REASONS.INVALID_TP };
+      const stops = resolveStops({
+        slPriceE4: slParsed.value,
+        tpPriceE4: tpParsed.value,
+        side,
+        refPriceE4: triggerPriceE4,
+        liqDist: liquidationDistance(leverage),
+      });
+      if (!stops.ok) return { ok: false, reason: mapStopReason(stops.reason) };
 
       const priceE4 = priceToE4(engine.market.price);
       const dist = Math.abs(triggerPriceE4 - priceE4) / priceE4;
@@ -330,16 +387,18 @@ export class RuleManager {
       rule.leverage = leverage;
       rule.marginA = marginA;
       rule.triggerPriceE4 = triggerPriceE4;
-      rule.slPct = sl.value != null ? sl.value * 100 : null;
-      rule.tpPct = tp.value != null ? tp.value * 100 : null;
+      rule.slPriceE4 = stops.slPriceE4;
+      rule.tpPriceE4 = stops.tpPriceE4;
+      rule.slPct = null;
+      rule.tpPct = null;
       rule.armedSide = triggerPriceE4 > priceE4 ? 'above' : 'below';
       rule.params = {
         side,
         trigger_price_e4: triggerPriceE4,
         margin_a: marginA,
         leverage,
-        sl_pct: rule.slPct,
-        tp_pct: rule.tpPct,
+        sl_price_e4: rule.slPriceE4,
+        tp_price_e4: rule.tpPriceE4,
       };
       // 參數改變 → 重新武裝
       rule.pendingTick = null;

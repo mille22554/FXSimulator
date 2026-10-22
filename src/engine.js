@@ -369,21 +369,25 @@ export class Engine {
   }
 
   // ------------------------------------------------------------ 交易
+  /**
+   * 手動市價開倉。
+   * 停損停利為**價格制**（整數 e4 價位）；不傳 refPriceE4 → 帳戶用「下單前的現價」驗證。
+   */
   open(userId = this.userId, params = {}) {
     const acct = this.ensureAccount(userId);
     const {
       side = 'long',
       marginA = 1000,
       leverage = DEFAULT_LEVERAGE,
-      slPct = null,
-      tpPct = null,
+      slPriceE4 = null,
+      tpPriceE4 = null,
     } = params;
     const result = acct.openPosition({
       side,
       marginA,
       leverage,
-      slPct,
-      tpPct,
+      slPriceE4,
+      tpPriceE4,
       market: this.market,
       tickCount: this.ticksExecuted,
       positionId: this.nextPositionId,
@@ -424,7 +428,9 @@ export class Engine {
 
   // ------------------------------------------------------------ M3 規則
   /**
-   * 規則成交（§6.3）：以**已含 0.1% 滑價**的成交價開倉，SL/TP 由成交價重算。
+   * 規則成交（§6.3）：以**已含 0.1% 滑價**的成交價開倉。
+   * 停損停利為**價格制**（規則建立時使用者輸入的絕對價位，原樣帶入）；
+   * 參考價 = 規則的觸發價（與建立／修改時的驗證基準一致）。
    * @param {number} userId
    * @param {object} rule 規則物件
    * @param {number} fillPriceE4 成交價（e4 整數）
@@ -435,8 +441,9 @@ export class Engine {
       side: rule.side,
       marginA: rule.marginA,
       leverage: rule.leverage,
-      slPct: rule.slPct != null ? rule.slPct / 100 : null,
-      tpPct: rule.tpPct != null ? rule.tpPct / 100 : null,
+      slPriceE4: rule.slPriceE4 ?? null,
+      tpPriceE4: rule.tpPriceE4 ?? null,
+      refPriceE4: rule.triggerPriceE4 ?? null,
       market: this.market,
       tickCount: this.ticksExecuted,
       positionId: this.nextPositionId,
@@ -507,7 +514,7 @@ export class Engine {
     return this.store.loadLedger?.(limit) ?? [];
   }
 
-  /** 全服 A 幣供給（現金 + 在場保證金） */
+  /** 全服楓幣供給（現金 + 在場保證金） */
   totalSupplyMilli() {
     let total = 0;
     for (const acct of this.accounts.values()) total += acct.equityMilli(this.ticksExecuted);

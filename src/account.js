@@ -21,12 +21,11 @@ import {
   MILLI_PER_A,
   MIN_NOTIONAL_A,
   MIN_NOTIONAL_MILLI,
-  MIN_SL_DISTANCE,
-  SL_MAX_LIQ_FACTOR,
   SPREAD_HALF,
   INCOME_MILLI_PER_TICK,
 } from './config.js';
 import { aToMilli, chargeFromMicro, hourlyFeeMicro, priceToE4, roundHalfUp } from './money.js';
+import { resolveStops } from './stops.js';
 
 /** §7.5：minMargin(lev) = ceil(10,000 / lev / 10) × 10 */
 export function minMarginForLeverage(leverage) {
@@ -172,7 +171,9 @@ export class Account {
    * 市價開倉。
    * @param {object} opts
    *   side 'long'|'short'、marginA 保證金(A)、leverage 槓桿、
-   *   slPct/tpPct 停損停利（0.005 = 0.5%）、market、tickCount、positionId
+   *   slPriceE4/tpPriceE4 停損停利（**價格制**：整數 e4 價位，如 4.9500 → 49500）、
+   *   market、tickCount、positionId
+   *   refPriceE4 驗證用的參考價（e4）；null → 用「下單前的現價」
    *   fillPriceE4（M3 條件開倉：已含 0.1% 滑價的成交價；給定時不再疊點差）
    *   ruleId（M3：觸發這筆開倉的規則 id；null = 玩家手動下單）
    */
@@ -180,8 +181,9 @@ export class Account {
     side,
     marginA,
     leverage,
-    slPct = null,
-    tpPct = null,
+    slPriceE4 = null,
+    tpPriceE4 = null,
+    refPriceE4 = null,
     market,
     tickCount,
     positionId,
@@ -232,18 +234,19 @@ export class Account {
     }
     const finalMarginMilli = notionalMilli / leverage;
 
-    // 停損停利驗證（§5.1 / §7.5）——必須在改動市場前完成，否則失敗會留下殘留衝擊
+    // 停損停利驗證（**價格制**，§5.1 / §7.5）——必須在改動市場前完成，否則失敗會留下殘留衝擊
+    //   參考價：手動開倉＝下單前的現價；規則開倉＝規則的觸發價（由呼叫端傳入）
     const liqDist = liquidationDistance(leverage);
-    if (slPct != null) {
-      if (!(slPct >= MIN_SL_DISTANCE)) {
-        return { ok: false, reason: 'sl_too_close', min: MIN_SL_DISTANCE };
-      }
-      if (slPct > liqDist * SL_MAX_LIQ_FACTOR) {
-        return { ok: false, reason: 'sl_beyond_liq', max: liqDist * SL_MAX_LIQ_FACTOR };
-      }
-    }
-    if (tpPct != null && !(tpPct > 0)) {
-      return { ok: false, reason: 'tp_invalid' };
+    const ref = refPriceE4 != null ? refPriceE4 : priceToE4(market.price);
+    const stops = resolveStops({
+      slPriceE4,
+      tpPriceE4,
+      side,
+      refPriceE4: ref,
+      liqDist,
+    });
+    if (!stops.ok) {
+      return { ok: false, reason: stops.reason, min: stops.min, max: stops.max };
     }
 
     // §4.3：衝擊先發生，成交價取「本次交易完成後」的價格
@@ -261,14 +264,9 @@ export class Account {
       entryPriceE4 = priceToE4(fill);
     }
 
-    let slPriceE4 = null;
-    let tpPriceE4 = null;
-    if (slPct != null) {
-      slPriceE4 = priceToE4(side === 'long' ? fill * (1 - slPct) : fill * (1 + slPct));
-    }
-    if (tpPct != null) {
-      tpPriceE4 = priceToE4(side === 'long' ? fill * (1 + tpPct) : fill * (1 - tpPct));
-    }
+    // 停損停利價格**原樣儲存**（價格制：使用者輸入的絕對價位，不依成交價重算）
+    const slPriceE4Final = stops.slPriceE4;
+    const tpPriceE4Final = stops.tpPriceE4;
 
     // 扣保證金
     this.balanceMilli -= finalMarginMilli;
@@ -286,8 +284,8 @@ export class Account {
       marginMilli: finalMarginMilli,
       entryPriceE4,
       liqPriceE4,
-      slPriceE4,
-      tpPriceE4,
+      slPriceE4: slPriceE4Final,
+      tpPriceE4: tpPriceE4Final,
       openedAt: tickCount,
       ruleId,
     });
@@ -306,30 +304,33 @@ export class Account {
     this.#ledger(-finalMarginMilli, 'margin_hold', tickCount, source);
     this.#notifyPosition(position);
 
-    // M3 §6.3：規則開倉的 SL/TP 以「實際成交價」重算；若成交價已穿過 SL → 立刻平倉
-    if (fillPriceE4 != null && slPriceE4 != null) {
-      const crossed = side === 'long' ? entryPriceE4 <= slPriceE4 : entryPriceE4 >= slPriceE4;
-      if (crossed) {
-        const closed = this.closePosition({
-          positionId: position.id,
-          market,
-          tickCount,
-          reason: 'stop_loss',
-          status: 'closed',
-        });
-        return {
-          ok: true,
-          position: closed.position,
-          entryPriceE4,
-          midPrice: market.price,
-          notionalMilli,
-          marginMilli: finalMarginMilli,
-          truncated,
-          availableMilli: this.balanceMilli,
-          closedImmediately: true,
-          closeResult: closed,
-        };
-      }
+    // 「成交即穿價」：成交價已穿過 SL / TP → 立刻平倉（§5.1）
+    //   long：entry ≤ sl → 停損；entry ≥ tp → 停利
+    //   short：entry ≥ sl → 停損；entry ≤ tp → 停利
+    const crossedSl = slPriceE4Final != null
+      && (side === 'long' ? entryPriceE4 <= slPriceE4Final : entryPriceE4 >= slPriceE4Final);
+    const crossedTp = tpPriceE4Final != null
+      && (side === 'long' ? entryPriceE4 >= tpPriceE4Final : entryPriceE4 <= tpPriceE4Final);
+    if (crossedSl || crossedTp) {
+      const closed = this.closePosition({
+        positionId: position.id,
+        market,
+        tickCount,
+        reason: crossedSl ? 'stop_loss' : 'take_profit',
+        status: 'closed',
+      });
+      return {
+        ok: true,
+        position: closed.position,
+        entryPriceE4,
+        midPrice: market.price,
+        notionalMilli,
+        marginMilli: finalMarginMilli,
+        truncated,
+        availableMilli: this.balanceMilli,
+        closedImmediately: true,
+        closeResult: closed,
+      };
     }
 
     return {

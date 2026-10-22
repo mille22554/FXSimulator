@@ -288,7 +288,32 @@ export function createMockServer(opts = {}) {
     if (Math.round(Number(d.margin_a) * 1000) > accountMsg().available_milli) return 'insufficient_margin';
     const gap = Math.abs(trig / 10000 - price) / price;
     if (gap < 0.0005) return 'trigger_too_close'; // 觸發價貼現價 <0.05%（優先於上限，安全反饋）
+    const sltpErr = checkSlTpE4(d.side, trig, Number(d.leverage), d.sl_price_e4, d.tp_price_e4);
+    if (sltpErr) return sltpErr;
     if (rules.filter(r => r.status === 'active' && r.enabled !== false).length >= 2) return 'max_active_rules';
+    return null;
+  }
+
+  /** SL/TP 價格驗證（整數 e4；null = 不設）。回傳拒絕原因或 null。
+      以參考價（現價／觸發價）檢查方向、0.05% 最小距離、SL 不得超過強平距離。 */
+  function checkSlTpE4(side, refE4, lev, slE4, tpE4) {
+    const liqDist = 1 / lev - MAINT_RATE;
+    for (const [raw, kind] of [[slE4, 'sl'], [tpE4, 'tp']]) {
+      if (raw == null) continue;
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v <= 0) return `${kind}_invalid`;
+      const wrongSide = kind === 'sl'
+        ? (side === 'long' ? v >= refE4 : v <= refE4)
+        : (side === 'long' ? v <= refE4 : v >= refE4);
+      if (wrongSide) return `${kind}_wrong_side`;
+      if (Math.abs(v - refE4) / refE4 < 0.0005) return `${kind}_too_close`;
+      if (kind === 'sl') {
+        const beyond = side === 'long'
+          ? v <= refE4 * (1 - liqDist * 0.9)
+          : v >= refE4 * (1 + liqDist * 0.9);
+        if (beyond) return 'sl_beyond_liq';
+      }
+    }
     return null;
   }
 
@@ -327,8 +352,8 @@ export function createMockServer(opts = {}) {
       entry_price_e4: fill_e4,
       margin_milli: marginMilli,
       liq_price_e4: Math.round(fill * (1 + dirMarker * liqDist) * 10000),
-      sl_price_e4: r.sl_pct ? Math.round(fill * (1 + dirMarker * Number(r.sl_pct) / 100) * 10000) : null,
-      tp_price_e4: r.tp_pct ? Math.round(fill * (1 - dirMarker * Number(r.tp_pct) / 100) * 10000) : null,
+      sl_price_e4: r.sl_price_e4 != null ? r.sl_price_e4 : null,
+      tp_price_e4: r.tp_price_e4 != null ? r.tp_price_e4 : null,
       pnl_milli: 0,
       status: 'open',
     };
@@ -455,8 +480,8 @@ export function createMockServer(opts = {}) {
         trigger_price_e4: trig,
         margin_a: Number(data.margin_a),
         leverage: Number(data.leverage),
-        sl_pct: data.sl_pct != null ? Number(data.sl_pct) : null,
-        tp_pct: data.tp_pct != null ? Number(data.tp_pct) : null,
+        sl_price_e4: data.sl_price_e4 != null ? Math.round(Number(data.sl_price_e4)) : null,
+        tp_price_e4: data.tp_price_e4 != null ? Math.round(Number(data.tp_price_e4)) : null,
         enabled: true,
         status: 'active',
         armed_side: trig / 10000 > price ? 'above' : 'below',
@@ -499,6 +524,11 @@ export function createMockServer(opts = {}) {
       if (marginMilli > acct.available_milli) return reject('insufficient_balance');
       if (acct.available_milli <= 0) return reject('debt_no_open');
 
+      // SL/TP 為絕對價格（整數 e4；null = 不設），以現價為參考驗證
+      const curPriceE4 = Math.round(price * 10000);
+      const sltpErr = checkSlTpE4(side, curPriceE4, lev, data.sl_price_e4, data.tp_price_e4);
+      if (sltpErr) return reject(sltpErr);
+
       // 名目上限 min(2L, available×lev)：超過 → 依 contract 可截斷（ok:true + truncated:true）
       const maxNotionalMilli = Math.min(2 * L_MILLI, acct.available_milli * lev);
       let marginEff = marginMilli;
@@ -523,9 +553,9 @@ export function createMockServer(opts = {}) {
         entry_price_e4: fillPrice_e4,
         margin_milli: marginEff,
         liq_price_e4: Math.round(fillPrice_e4 * (1 + dirMarker * liqDist)),
-        // sl_pct/tp_pct 為 % 數字（0.5 = 0.5%，contract 定案）
-        sl_price_e4: data.sl_pct ? Math.round(fillPrice_e4 * (1 + dirMarker * Number(data.sl_pct) / 100)) : null,
-        tp_price_e4: data.tp_pct ? Math.round(fillPrice_e4 * (1 - dirMarker * Number(data.tp_pct) / 100)) : null,
+        // sl_price_e4/tp_price_e4 為整數 e4 絕對價位（contract 定案）
+        sl_price_e4: data.sl_price_e4 != null ? Math.round(Number(data.sl_price_e4)) : null,
+        tp_price_e4: data.tp_price_e4 != null ? Math.round(Number(data.tp_price_e4)) : null,
         pnl_milli: 0,
         status: 'open',
       };

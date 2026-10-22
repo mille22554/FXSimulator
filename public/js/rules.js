@@ -3,8 +3,8 @@
    rule.upsert / rule.delete（回覆 rule.updated / rule.rejected）。
    觸發價與現價距離 <0.05% → 警示「會立刻成交；後端會以 trigger_too_close 拒絕。 */
 
-import { state } from './state.js?v=11';
-import { $, $$, el, fmtA, fmtPrice, priceE4, api } from './util.js?v=11';
+import { state } from './state.js?v=12';
+import { $, $$, el, fmtA, fmtPrice, priceE4, api } from './util.js?v=12';
 
 const TRIGGER_TOO_CLOSE_PCT = 0.0005; // 0.05%
 
@@ -32,6 +32,15 @@ const REASON_TEXT = {
   invalid_leverage: '槓桿無效',
   invalid_side: '方向無效',
   insufficient_margin: '可用餘額不足',
+  sl_invalid: '停損價無效',
+  tp_invalid: '停利價無效',
+  sl_wrong_side: '停損價方向錯誤（買入需低於現價、賣出需高於現價）',
+  tp_wrong_side: '停利價方向錯誤（買入需高於現價、賣出需低於現價）',
+  sl_too_close: '停損價太近（至少 0.05%）',
+  sl_beyond_liq: '停損價超過強平距離',
+  tp_too_close: '停利價太近（至少 0.05%）',
+  sl_pct_removed: '此頁版本過舊，請重新整理（停損停利已改為價格）',
+  tp_pct_removed: '此頁版本過舊，請重新整理（停損停利已改為價格）',
 };
 export const ruleReasonText = r => REASON_TEXT[r] || r;
 const SKIPPED_TEXT = {
@@ -144,11 +153,14 @@ export function initRulesPanel() {
       });
       refreshFormCalc();
       refreshTriggerHint();
+      refreshSltpHints();
     });
   });
 
   $('#ruleTrigger').addEventListener('input', refreshTriggerHint);
   $('#ruleMargin').addEventListener('input', refreshFormCalc);
+  $('#ruleSl').addEventListener('input', refreshSltpHints);
+  $('#ruleTp').addEventListener('input', refreshSltpHints);
   $('#ruleLevRow').addEventListener('click', e => {
     const btn = e.target.closest('.lev-btn');
     if (!btn) return;
@@ -214,8 +226,8 @@ export function renderRules() {
       `保證金 ${fmtA((r.margin_a ?? 0) * 1000)} 楓幣`,
       `${r.leverage}×`,
     ];
-    if (r.sl_pct != null) bits.push(`SL ${r.sl_pct}%`);
-    if (r.tp_pct != null) bits.push(`TP ${r.tp_pct}%`);
+    if (r.sl_price_e4 != null) bits.push(`SL ${fmtPrice(r.sl_price_e4)}`);
+    if (r.tp_price_e4 != null) bits.push(`TP ${fmtPrice(r.tp_price_e4)}`);
     for (const b of bits) row2.append(el('span', null, b));
 
     const row3 = el('div', 'rule-row3');
@@ -281,8 +293,8 @@ function openForm(id) {
     });
     $('#ruleTrigger').value = (r.trigger_price_e4 / 10000).toFixed(4);
     $('#ruleMargin').value = String(r.margin_a);
-    $('#ruleSl').value = r.sl_pct != null ? String(r.sl_pct) : '';
-    $('#ruleTp').value = r.tp_pct != null ? String(r.tp_pct) : '';
+    $('#ruleSl').value = r.sl_price_e4 != null ? (r.sl_price_e4 / 10000).toFixed(4) : '';
+    $('#ruleTp').value = r.tp_price_e4 != null ? (r.tp_price_e4 / 10000).toFixed(4) : '';
     $('#ruleSubmit').textContent = '更新條件單';
     $$('.lev-btn', row).forEach(b => b.setAttribute('aria-checked', String(Number(b.dataset.lev) === r.leverage)));
   } else {
@@ -306,6 +318,35 @@ function openForm(id) {
 }
 
 function findRule(id) { return rulesStore.rules.find(r => r.id === id); }
+
+/* SL/TP 價格解析：空字串 → null；有值 → 整數 e4；無效 → NaN */
+function parsePriceE4(raw) {
+  if (raw == null || String(raw).trim() === '') return null;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v <= 0) return NaN;
+  return Math.round(v * 10000);
+}
+
+/* SL/TP 欄位即時提示：以觸發價為參考，顯示距離百分比或方向要求 */
+function refreshSltpHints() {
+  const trigE4 = priceE4(Number($('#ruleTrigger').value));
+  const trigOk = trigE4 > 0;
+  for (const [inpSel, hintSel, kind] of [['#ruleSl', '#ruleSlHint', 'sl'], ['#ruleTp', '#ruleTpHint', 'tp']]) {
+    const hint = $(hintSel);
+    if (!hint) continue;
+    if (!trigOk) { hint.textContent = ''; continue; }
+    // 做多：SL 需低於觸發價、TP 需高於觸發價；做空相反
+    const needLower = kind === 'sl' ? formSide === 'long' : formSide === 'short';
+    const sideText = `${formSide === 'long' ? '做多' : '做空'}需${needLower ? '低於' : '高於'}觸發價`;
+    const raw = $(inpSel).value;
+    const e4 = parsePriceE4(raw);
+    if (raw.trim() === '' || Number.isNaN(e4)) { hint.textContent = sideText; continue; }
+    const wrongSide = needLower ? e4 >= trigE4 : e4 <= trigE4;
+    if (wrongSide) { hint.textContent = sideText; continue; }
+    const gap = Math.abs(e4 - trigE4) / trigE4 * 100;
+    hint.textContent = `距觸發 ${gap.toFixed(2)}%`;
+  }
+}
 
 function refreshTriggerHint() {
   const p = state.market.price_e4;
@@ -331,6 +372,7 @@ function refreshTriggerHint() {
   } else {
     warn.hidden = true;
   }
+  refreshSltpHints();
 }
 
 function refreshFormCalc() {
@@ -353,15 +395,33 @@ function submitRuleForm() {
   if (!(triggerA > 0)) return openFormNote('請輸入觸發價', true);
   const margin_a = Math.round(Number($('#ruleMargin').value) || 0);
   if (!(margin_a > 0)) return openFormNote('請輸入保證金', true);
-  const sl = Number($('#ruleSl').value);
-  const tp = Number($('#ruleTp').value);
+  const triggerE4 = priceE4(triggerA);
+
+  // SL/TP 為絕對價格：空 → null；有值 → 整數 e4
+  const slE4 = parsePriceE4($('#ruleSl').value);
+  const tpE4 = parsePriceE4($('#ruleTp').value);
+  if (Number.isNaN(slE4) || Number.isNaN(tpE4)) return openFormNote('停損／停利價格式無效，請輸入有效價格。', true);
+
+  // 方向 sanity（以觸發價為參考；後端仍會擋）
+  const sideText = formSide === 'long' ? '做多' : '做空';
+  if (slE4 != null) {
+    const bad = formSide === 'long' ? slE4 >= triggerE4 : slE4 <= triggerE4;
+    if (bad) return openFormNote(`${sideText}的停損價需${formSide === 'long' ? '低於' : '高於'}觸發價。`, true);
+    if (Math.abs(slE4 - triggerE4) / triggerE4 < TRIGGER_TOO_CLOSE_PCT) return openFormNote('停損價太近（至少 0.05%）。', true);
+  }
+  if (tpE4 != null) {
+    const bad = formSide === 'long' ? tpE4 <= triggerE4 : tpE4 >= triggerE4;
+    if (bad) return openFormNote(`${sideText}的停利價需${formSide === 'long' ? '高於' : '低於'}觸發價。`, true);
+    if (Math.abs(tpE4 - triggerE4) / triggerE4 < TRIGGER_TOO_CLOSE_PCT) return openFormNote('停利價太近（至少 0.05%）。', true);
+  }
+
   const data = {
     side: formSide,
-    trigger_price_e4: priceE4(triggerA),
+    trigger_price_e4: triggerE4,
     margin_a,
     leverage: formLev,
-    sl_pct: sl > 0 ? Number(sl.toFixed(4)) : null,
-    tp_pct: tp > 0 ? Number(tp.toFixed(4)) : null,
+    sl_price_e4: slE4,
+    tp_price_e4: tpE4,
   };
 
   const rid = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;

@@ -1,9 +1,9 @@
 /* order.js — 下單面板：槓桿 toggle、保證金輸入＋拉桿雙向同步、
    即時預覽（名目／預估成交／強平／持倉費／最大損失）、
-   SL/TP（上限＝強平距離×0.9）、自動再下單計數、300ms debounce 送出。 */
+   SL/TP（絕對價格輸入，送整數 e4）、自動再下單計數、300ms debounce 送出。 */
 
-import { state } from './state.js?v=11';
-import { $, $$, el, fmtA, fmtFee, fmtPrice, fmtPct, pctSigned, priceE4 } from './util.js?v=11';
+import { state } from './state.js?v=12';
+import { $, $$, el, fmtA, fmtFee, fmtPrice, fmtPct, pctSigned, priceE4 } from './util.js?v=12';
 
 const cfg = () => state.config;
 
@@ -11,6 +11,7 @@ let lev = 10;
 let sendFn = null;          // (type, data) → void（app 提供 transport.send）
 let debounceTimer = null;
 let lastSend = 0;
+let sltpError = '';         // SL/TP 即時驗證錯誤（送出前擋下；輸入變動即清除）
 
 export function initOrderPanel(onSend) {
   sendFn = onSend;
@@ -49,9 +50,9 @@ export function initOrderPanel(onSend) {
     renderPreview();
   });
 
-  // SL / TP
-  $('#slInput').addEventListener('input', renderPreview);
-  $('#tpInput').addEventListener('input', renderPreview);
+  // SL / TP（絕對價格）
+  $('#slInput').addEventListener('input', () => { sltpError = ''; renderPreview(); });
+  $('#tpInput').addEventListener('input', () => { sltpError = ''; renderPreview(); });
 
   // 自動再下單
   $('#reentryCheck').addEventListener('change', e => {
@@ -175,25 +176,24 @@ export function renderPreview() {
 
   $('#pvMargin').textContent = `${fmtA(marginA * 1000)} 楓幣`;
 
-  // SL/TP 上限：強平距離 × 0.9；欄位單位＝% 數字（0.5 = 0.5%，contract 定案）
-  const maxPctInput = pBuy.liqDist * 100 * 0.9;
-  for (const [inpId, noteKey] of [['#slInput', 'sl'], ['#tpInput', 'tp']]) {
+  // SL/TP 為絕對價格輸入：顯示與現價的距離百分比，讓玩家知道停損／停利多遠
+  const curE4 = state.market.price_e4;
+  const cur = curE4 != null ? curE4 / 10000 : null;
+  for (const [inpId, spanId] of [['#slInput', '#slPrice'], ['#tpInput', '#tpPrice']]) {
     const inp = $(inpId);
-    let v = Number(inp.value);
-    if (inp.value === '' || Number.isNaN(v) || v <= 0) continue;
-    let clamped = false;
-    if (v > maxPctInput) { v = Math.floor(maxPctInput * 100) / 100; inp.value = String(v); clamped = true; }
-    const dir = noteKey === 'sl' ? -1 : 1;
-    const price = pBuy.fill * (1 + dir * v / 100);
-    $(noteKey === 'sl' ? '#slPrice' : '#tpPrice').textContent = `≈ ${fmtPrice(priceE4(price))}`;
-    const note = $('#sltpNote');
-    note.hidden = !clamped;
-    if (clamped) note.textContent = '超過強平線，已自動夾在強平距離 90%。';
+    const span = $(spanId);
+    const v = Number(inp.value);
+    if (inp.value.trim() === '' || !Number.isFinite(v) || v <= 0 || cur == null) { span.textContent = ''; continue; }
+    const dist = Math.abs(v - cur) / cur * 100;
+    span.textContent = `${dist.toFixed(2)}%`;
   }
-  const slEmpty = $('#slInput').value === '';
-  const tpEmpty = $('#tpInput').value === '';
-  if (slEmpty) $('#slPrice').textContent = '';
-  if (tpEmpty) $('#tpPrice').textContent = '';
+  if (($('#slInput').value.trim() !== '' && !Number.isFinite(Number($('#slInput').value)))
+    || ($('#tpInput').value.trim() !== '' && !Number.isFinite(Number($('#tpInput').value)))) {
+    sltpError = '停損／停利價格式無效，請輸入有效價格。';
+  }
+  const note = $('#sltpNote');
+  note.hidden = !sltpError;
+  note.textContent = sltpError;
 
   // 大單警示（> 可用 50%）
   const { availableA } = marginBounds();
@@ -221,15 +221,48 @@ function submit(side) {
   const { minMargin, availableA } = marginBounds();
   if (marginA <= 0 || availableA < minMargin) return;
 
-  const slRaw = Number($('#slInput').value);
-  const tpRaw = Number($('#tpInput').value);
-  const p = computePreview(marginA, side);
+  const fail = msg => {
+    sltpError = msg;
+    const note = $('#sltpNote');
+    note.hidden = false;
+    note.textContent = msg;
+  };
+
+  // SL/TP 為絕對價格：空字串 → null；有值 → 整數 e4（4.9500 → 49500）
+  const parsePriceE4 = id => {
+    const raw = $(id).value.trim();
+    if (raw === '') return { ok: true, e4: null };
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0) return { ok: false, e4: null };
+    return { ok: true, e4: Math.round(v * 10000) };
+  };
+  const sl = parsePriceE4('#slInput');
+  const tp = parsePriceE4('#tpInput');
+  if (!sl.ok || !tp.ok) return fail('停損／停利價格式無效，請輸入有效價格。');
+
+  // 方向 sanity（後端仍會擋，這裡先擋明顯錯誤）
+  const curE4 = state.market.price_e4;
+  if (curE4 != null) {
+    if (sl.e4 != null) {
+      const bad = side === 'long' ? sl.e4 >= curE4 : sl.e4 <= curE4;
+      if (bad) return fail(side === 'long'
+        ? '買入的停損價需低於現價。'
+        : '賣出的停損價需高於現價。');
+    }
+    if (tp.e4 != null) {
+      const bad = side === 'long' ? tp.e4 <= curE4 : tp.e4 >= curE4;
+      if (bad) return fail(side === 'long'
+        ? '買入的停利價需高於現價。'
+        : '賣出的停利價需低於現價。');
+    }
+  }
+
   const data = {
     side,
     margin_a: marginA,
     leverage: lev,
-    sl_pct: slRaw > 0 ? Number(slRaw.toFixed(4)) : null,
-    tp_pct: tpRaw > 0 ? Number(tpRaw.toFixed(4)) : null,
+    sl_price_e4: sl.e4,
+    tp_price_e4: tp.e4,
   };
   if (state.reentry.enabled) consumeReentry();
   sendFn('order.open', data);

@@ -14,7 +14,7 @@ export const MICRO_PER_A = 1_000_000; // 微 A（1 A = 1,000,000）——唯一�
 export const E4 = 10000; // 價格刻度：5.0000 → 50000
 
 // ---------------------------------------------------------------- 標的 / 價格
-export const SYMBOL = 'A/B';
+export const SYMBOL = '楓幣/珂爾';
 export const BASE_PRICE = 5.0; // 起始 1 B = 5.0000 A
 export const BASE_PRICE_E4 = 50000;
 export const MU_INITIAL = Math.log(BASE_PRICE);

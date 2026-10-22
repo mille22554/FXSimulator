@@ -1,7 +1,7 @@
 /* positions.js — 底部持倉卡片列：方向／名目／進場／槓桿／浮動損益／強平／平倉 */
 
-import { state } from './state.js?v=11';
-import { $, el, fmtA, fmtA1, fmtPrice } from './util.js?v=11';
+import { state } from './state.js?v=12';
+import { $, el, fmtA, fmtA1, fmtPrice } from './util.js?v=12';
 
 export function initPositions(onClose) {
   renderPositions();

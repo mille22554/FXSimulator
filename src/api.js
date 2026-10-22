@@ -34,7 +34,7 @@ import {
 } from './config.js';
 import { minMarginForLeverage } from './account.js';
 import { markE4, positionJson, stateJson } from './serialize.js';
-import { resolvePct } from './pct.js';
+import { parseStopPrice, pctOnlyGiven } from './stops.js';
 import { ruleJson } from './rules.js';
 import { WS_OPEN } from './live.js';
 import {
@@ -59,6 +59,10 @@ export { resolveUserId, AuthError, devAuthEnabled };
  * M1 內部原因 → contract 穩定原因字串。
  * contract 明列：insufficient_balance / max_positions / min_notional / max_notional /
  *                debt_no_open / invalid_leverage / invalid_side
+ *
+ * 未列在此表的原因（價格制停損停利：sl_invalid / sl_wrong_side / sl_too_close /
+ * sl_beyond_liq / tp_invalid / tp_wrong_side / tp_too_close / sl_pct_removed /
+ * tp_pct_removed）會由 `mapReason` **原樣回傳**。
  */
 const REASON_MAP = {
   side_invalid: 'invalid_side',
@@ -86,7 +90,8 @@ export function mapReason(reason) {
 }
 
 // ---------------------------------------------------------------------------
-// 停損 / 停利百分比解析（實作在 `src/pct.js`，M2 下單與 M3 規則共用）
+// 停損 / 停利（**價格制**：sl_price_e4 / tp_price_e4，實作在 `src/stops.js`）
+//   舊的 sl_pct / tp_pct 已移除 → 回 *_pct_removed
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -105,12 +110,22 @@ function parseOrderInput(body, { requireLeverage = true } = {}) {
   }
   if (!Number.isFinite(marginA)) return { error: 'invalid_margin' };
 
-  const sl = resolvePct(body?.sl_pct ?? body?.slPct, { kind: 'sl', leverage });
-  if (sl.error) return { error: sl.error };
-  const tp = resolvePct(body?.tp_pct ?? body?.tpPct, { kind: 'tp', leverage });
-  if (tp.error) return { error: tp.error };
+  // 停損 / 停利：價格制（整數 e4 價位；4.9500 → 49500）
+  const slPriceRaw = body?.sl_price_e4 ?? body?.slPriceE4;
+  const tpPriceRaw = body?.tp_price_e4 ?? body?.tpPriceE4;
+  // 舊的百分比欄位已移除 → 明確回 *_pct_removed，讓舊頁面知道要重整
+  if (pctOnlyGiven(body?.sl_pct ?? body?.slPct, slPriceRaw)) {
+    return { error: 'sl_pct_removed' };
+  }
+  if (pctOnlyGiven(body?.tp_pct ?? body?.tpPct, tpPriceRaw)) {
+    return { error: 'tp_pct_removed' };
+  }
+  const sl = parseStopPrice(slPriceRaw);
+  if (sl.error) return { error: 'sl_invalid' };
+  const tp = parseStopPrice(tpPriceRaw);
+  if (tp.error) return { error: 'tp_invalid' };
 
-  return { side, leverage, marginA, slPct: sl.value, tpPct: tp.value };
+  return { side, leverage, marginA, slPriceE4: sl.value, tpPriceE4: tp.value };
 }
 
 function fillJson(result) {
@@ -229,8 +244,8 @@ export function registerApi(app, ctx) {
       side: parsed.side,
       marginA: parsed.marginA,
       leverage: parsed.leverage,
-      slPct: parsed.slPct,
-      tpPct: parsed.tpPct,
+      slPriceE4: parsed.slPriceE4,
+      tpPriceE4: parsed.tpPriceE4,
     });
     if (!result.ok) return { ok: false, reason: mapReason(result.reason) };
 
@@ -285,7 +300,17 @@ export function registerApi(app, ctx) {
 
     const patch = {};
     if (body.enabled !== undefined) patch.enabled = body.enabled;
-    for (const key of ['side', 'trigger_price_e4', 'margin_a', 'leverage', 'sl_pct', 'tp_pct', 'confirm']) {
+    // 舊的百分比欄位已移除 → 明確回 *_pct_removed，讓舊頁面知道要重整
+    if (pctOnlyGiven(body?.sl_pct ?? body?.slPct, body?.sl_price_e4 ?? body?.slPriceE4)) {
+      return { ok: false, reason: 'sl_pct_removed' };
+    }
+    if (pctOnlyGiven(body?.tp_pct ?? body?.tpPct, body?.tp_price_e4 ?? body?.tpPriceE4)) {
+      return { ok: false, reason: 'tp_pct_removed' };
+    }
+    for (const key of [
+      'side', 'trigger_price_e4', 'margin_a', 'leverage',
+      'sl_price_e4', 'tp_price_e4', 'confirm',
+    ]) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     const result = engine.rules.updateRule(userId, id, patch);
@@ -480,8 +505,8 @@ function handleOrderOpen(ctx, client, msg) {
     side: parsed.side,
     marginA: parsed.marginA,
     leverage: parsed.leverage,
-    slPct: parsed.slPct,
-    tpPct: parsed.tpPct,
+    slPriceE4: parsed.slPriceE4,
+    tpPriceE4: parsed.tpPriceE4,
   });
   if (!result.ok) {
     reject(client, requestId, mapReason(result.reason));

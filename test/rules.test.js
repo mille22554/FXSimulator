@@ -419,12 +419,12 @@ test('R6b. 報告會記錄 SL 平倉', () => {
   const engine = newEngine();
   freezePrice(engine, 5.0);
   makeRule(engine, 1, {
-    side: 'long', trigger_price_e4: 50100, margin_a: 1000, leverage: 10, sl_pct: 0.5,
+    side: 'long', trigger_price_e4: 50100, margin_a: 1000, leverage: 10, sl_price_e4: 49800,
   });
 
   freezePrice(engine, 5.011);
   engine.tick(1);
-  engine.tick(1); // 成交（SL = 成交價 −0.5%）
+  engine.tick(1); // 成交（SL 為建立時指定的絕對價位 4.9800）
 
   // 價格跌破 SL
   freezePrice(engine, 4.9);
@@ -542,7 +542,7 @@ test('R7. REST：GET/POST/PATCH/DELETE /api/rules（穩定原因字串）', asyn
     const created = json(await app.inject({
       method: 'POST',
       url: '/api/rules?user=1',
-      payload: { side: 'long', trigger_price_e4: 50100, margin_a: 1000, leverage: 10, sl_pct: 0.5 },
+      payload: { side: 'long', trigger_price_e4: 50100, margin_a: 1000, leverage: 10, sl_price_e4: 49800 },
     }));
     assert.equal(created.ok, true);
     const rule = created.rule;
@@ -550,7 +550,9 @@ test('R7. REST：GET/POST/PATCH/DELETE /api/rules（穩定原因字串）', asyn
     assert.equal(rule.status, 'active');
     assert.equal(rule.armed_side, 'above');
     assert.equal(rule.enabled, true);
-    assert.equal(rule.sl_pct, 0.5);
+    assert.equal(rule.sl_price_e4, 49800);
+    assert.equal(rule.tp_price_e4, null);
+    assert.equal(rule.sl_pct, null);
     assert.equal(rule.tp_pct, null);
     assert.equal(rule.last_error, null);
 
@@ -742,6 +744,65 @@ test('R9. 觸發價離現價 < 0.05% → trigger_too_close（確認後可建立�
 });
 
 // ---------------------------------------------------------------------------
+// R9b：規則停損／停利價格制（§7.5）
+// ---------------------------------------------------------------------------
+test('R9b. 規則 SL/TP 價格制：方向、距離、強平上限、舊 pct 已移除', () => {
+  const engine = newEngine();
+  freezePrice(engine, 5.0); // 50000
+
+  const base = { side: 'long', trigger_price_e4: 50100, margin_a: 1000, leverage: 10 };
+
+  // 做多：SL 必須 < 觸發價、TP 必須 > 觸發價
+  assert.equal(engine.rules.createRule(1, { ...base, sl_price_e4: 50200 }).reason, 'sl_wrong_side');
+  assert.equal(engine.rules.createRule(1, { ...base, tp_price_e4: 50000 }).reason, 'tp_wrong_side');
+  // 距離 < 0.05%
+  assert.equal(engine.rules.createRule(1, { ...base, sl_price_e4: 50099 }).reason, 'sl_too_close');
+  // 超過強平距離（lev 10：0.098 × 0.9 = 8.82%）
+  assert.equal(engine.rules.createRule(1, { ...base, sl_price_e4: 45000 }).reason, 'sl_beyond_liq');
+
+  // 舊百分比欄位 → 明確拒絕（前端需重整）
+  assert.equal(engine.rules.createRule(1, { ...base, sl_pct: 0.5 }).reason, 'sl_pct_removed');
+  assert.equal(engine.rules.createRule(1, { ...base, tp_pct: 1 }).reason, 'tp_pct_removed');
+
+  // 合法：價格原樣存入（不做任何換算）
+  const ok = engine.rules.createRule(1, { ...base, sl_price_e4: 49800, tp_price_e4: 50400 });
+  assert.ok(ok.ok, ok.reason);
+  assert.equal(ok.rule.slPriceE4, 49800);
+  assert.equal(ok.rule.tpPriceE4, 50400);
+  assert.equal(ok.rule.params.sl_price_e4, 49800);
+  assert.equal(ok.rule.params.tp_price_e4, 50400);
+
+  // 編輯：帶 pct 也拒絕；帶價格可改
+  assert.equal(engine.rules.updateRule(1, ok.rule.id, { sl_pct: 0.5 }).reason, 'sl_pct_removed');
+  const edited = engine.rules.updateRule(1, ok.rule.id, { sl_price_e4: 49700 });
+  assert.ok(edited.ok, edited.reason);
+  assert.equal(edited.rule.slPriceE4, 49700);
+  assert.equal(edited.rule.tpPriceE4, 50400, '未帶 TP → 沿用原值');
+});
+
+// ---------------------------------------------------------------------------
+// R9c：手動開倉（REST）價格制契約
+// ---------------------------------------------------------------------------
+test('R9c. POST /api/open：舊 sl_pct 回 sl_pct_removed、方向錯誤回 sl_wrong_side、價格原樣回傳', async () => {
+  await withServer(async ({ app, engine }) => {
+    freezePrice(engine, 5.0);
+
+    const post = (payload) => app.inject({ method: 'POST', url: '/api/open?user=1', payload });
+    const order = { side: 'long', margin_a: 1000, leverage: 10 };
+
+    assert.equal(json(await post({ ...order, sl_pct: 0.5 })).reason, 'sl_pct_removed');
+    assert.equal(json(await post({ ...order, tp_pct: 1 })).reason, 'tp_pct_removed');
+    assert.equal(json(await post({ ...order, sl_price_e4: 50500 })).reason, 'sl_wrong_side');
+    assert.equal(json(await post({ ...order, sl_price_e4: 49999 })).reason, 'sl_too_close');
+
+    const res = json(await post({ ...order, sl_price_e4: 49800, tp_price_e4: 50400 }));
+    assert.equal(res.ok, true, res.reason);
+    assert.equal(res.position.sl_price_e4, 49800);
+    assert.equal(res.position.tp_price_e4, 50400);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // R11：UI 整合細節（ack / WS data.user / snapshot.rules）
 // ---------------------------------------------------------------------------
 test('R11. POST /api/report/ack { user } → { ok: true }，last_seen_tick 前移', async () => {
@@ -826,7 +887,7 @@ test('R10. schema：M3 新增欄位與 rule_events 表（§6.2 v0.25 欄位不�
     assert.ok(cols('positions').includes('fee_remainder_micro'));
 
     // M3 新增欄位
-    for (const col of ['status', 'armed_side', 'last_error', 'paused_reason', 'last_notified_tick', 'sl_pct', 'tp_pct']) {
+    for (const col of ['status', 'armed_side', 'last_error', 'paused_reason', 'last_notified_tick', 'sl_pct', 'tp_pct', 'sl_price_e4', 'tp_price_e4']) {
       assert.ok(cols('rules').includes(col), `rules 應有 ${col}`);
     }
     for (const col of ['last_seen_tick', 'equity_high_milli', 'equity_low_milli']) {

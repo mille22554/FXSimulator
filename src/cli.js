@@ -5,7 +5,7 @@
  *   node src/cli.js init
  *   node src/cli.js status
  *   node src/cli.js tick 60
- *   node src/cli.js open --side long --margin 1000 --leverage 10 [--sl 0.5] [--tp 1]
+ *   node src/cli.js open --side long --margin 1000 --leverage 10 [--sl 4.9500] [--tp 5.0500]
  *   node src/cli.js close 1
  *   node src/cli.js candles 10
  *   node src/cli.js events 10
@@ -13,7 +13,7 @@
  *   node src/cli.js reset
  *
  * 通用選項：--db <path>（或環境變數 FXSIM_DB）、--seed <n>、--user <id>
- * --sl / --tp 單位為「百分比數字」：0.5 代表 0.5%。
+ * --sl / --tp 單位為「價格」（絕對價位）：4.9500 代表 4.9500 楓幣/珂爾。
  */
 
 import { existsSync, rmSync } from 'node:fs';
@@ -95,7 +95,7 @@ async function main() {
   node src/cli.js init
   node src/cli.js status
   node src/cli.js tick <N>
-  node src/cli.js open --side long|short --margin <A> --leverage <N> [--sl <pct>] [--tp <pct>]
+  node src/cli.js open --side long|short --margin <A> --leverage <N> [--sl <price>] [--tp <price>]
   node src/cli.js close <positionId>
   node src/cli.js candles <N>
   node src/cli.js events <N>
@@ -103,7 +103,7 @@ async function main() {
   node src/cli.js reset
 
 選項：--db <path>  --seed <n>  --user <id>
---sl / --tp 以百分比數字表示（0.5 = 0.5%）。`);
+--sl / --tp 以價格表示（4.9500 = 4.9500 楓幣/珂爾）。`);
     return;
   }
 
@@ -148,10 +148,10 @@ async function main() {
         const side = flags.side ?? 'long';
         const marginA = Number(flags.margin);
         const leverage = Number(flags.leverage ?? DEFAULT_LEVERAGE);
-        const slPct = flags.sl !== undefined ? Number(flags.sl) / 100 : null;
-        const tpPct = flags.tp !== undefined ? Number(flags.tp) / 100 : null;
+        const slPriceE4 = flags.sl !== undefined ? Math.round(Number(flags.sl) * 10000) : null;
+        const tpPriceE4 = flags.tp !== undefined ? Math.round(Number(flags.tp) * 10000) : null;
         if (!Number.isFinite(marginA)) throw new Error('open 需要 --margin');
-        const r = engine.open(userId, { side, marginA, leverage, slPct, tpPct });
+        const r = engine.open(userId, { side, marginA, leverage, slPriceE4, tpPriceE4 });
         if (!r.ok) {
           console.log(`開倉被拒：${r.reason}`);
           process.exitCode = 1;
