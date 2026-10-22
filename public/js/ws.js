@@ -1,9 +1,11 @@
-/* ws.js — 傳輸層。真實：/ws?user=<id> + 指數退避重連；mock：本地模擬伺服器。
-   兩者共用同一種訊息介面（contract 形狀），App 不需知道差別。 */
+/* ws.js — 傳輸層。真實：/ws?user=<id>（僅 dev_auth 時帶）+ 指數退避重連；
+   mock：本地模擬伺服器。兩者共用同一種訊息介面（contract 形狀），App 不需知道差別。
+   M3：handshake 被 1008 unauthorized 關閉 → 停止重連，交由 App 的登入流程裁決。 */
 
 import { createMockServer } from './mock.js';
+import { BASE } from './util.js';
 
-export function createTransport({ mock, userId, onStatus, onMessage, mockOpts = {} }) {
+export function createTransport({ mock, userId, onStatus, onMessage, onUnauthorized, mockOpts = {} }) {
 
   if (mock) {
     const server = createMockServer(mockOpts);
@@ -44,7 +46,9 @@ export function createTransport({ mock, userId, onStatus, onMessage, mockOpts = 
     if (!wanted) return;
     onStatus(attempt === 0 ? 'connecting' : 'reconnect');
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${location.host}/ws?user=${encodeURIComponent(userId)}`);
+    // M3：只有 dev_auth 核可（userId 非 null）才帶 ?user=，純 session 走 /ws
+    const qs = userId == null ? '' : `?user=${encodeURIComponent(userId)}`;
+    ws = new WebSocket(`${proto}//${location.host}${BASE}/ws${qs}`);
 
     ws.onopen = () => {
       attempt = 0;
@@ -57,9 +61,14 @@ export function createTransport({ mock, userId, onStatus, onMessage, mockOpts = 
       if (m.type === 'pong') return;
       onMessage(m);
     };
-    ws.onclose = () => {
+    ws.onclose = e => {
       setPing(false);
       ws = null;
+      // M3：handshake 未授權（close code 1008）→ 停止重連，顯示登入遮罩
+      if (e && e.code === 1008) {
+        wanted = false;
+        if (onUnauthorized) { onUnauthorized(); return; }
+      }
       if (!wanted) { onStatus('offline'); return; }
       const wait = backoffMs(Math.min(attempt, 5));
       attempt++;

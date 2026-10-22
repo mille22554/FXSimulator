@@ -912,4 +912,82 @@ input[type="range"]::-moz-range-thumb {
 /* ── Reduced motion：M3 面板動畫一併關閉 ── */
 @media (prefers-reduced-motion: reduce) {
   .panel-sheet { animation: none !important; }
+  .login-card { animation: none; }
 }
+
+/* ============================================================
+   M3 — 登入體驗：登入遮罩＋topbar 使用者區（桌機／手機共用）
+   ============================================================ */
+
+/* 遮罩期間：只看得到登入卡，交易骨架全隱（不重排，避免載入閃動） */
+body.gated #app > *:not(#loginGate) { visibility: hidden; }
+
+.login-gate {
+  z-index: 100;
+  background:
+    radial-gradient(1100px 520px at 50% -12%, rgba(38, 208, 124, .08), transparent 62%),
+    rgba(6, 9, 14, .9);
+  backdrop-filter: blur(8px);
+}
+
+.login-card {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  width: min(380px, 92vw);
+  padding: 34px 30px 24px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .65);
+  animation: gateIn .25s ease;
+}
+@keyframes gateIn { from { opacity: 0; transform: translateY(12px); } }
+
+.login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.login-brand .brand-mark { width: 26px; height: 26px; color: var(--up); }
+.login-brand b { font-size: 22px; font-weight: 600; letter-spacing: .08em; }
+.login-sub { font-size: 11px; letter-spacing: .22em; color: var(--faint); margin-bottom: 14px; }
+.login-desc { font-size: 12px; line-height: 1.7; color: var(--dim); max-width: 300px; margin-bottom: 20px; }
+
+.g-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; min-height: 46px;
+  font-size: 14px; font-weight: 500; color: #1d2129;
+  background: #fff; border: none; border-radius: 6px;
+  transition: filter .12s, opacity .12s;
+}
+.g-btn:hover:not(:disabled) { filter: brightness(1.06); }
+.g-btn:disabled { opacity: .55; cursor: default; }
+
+.g-note { min-height: 18px; margin-top: 10px; font-size: 12px; line-height: 1.5; color: var(--down); }
+.login-foot { margin-top: 6px; font-size: 10px; color: var(--faint); }
+
+/* ── topbar 使用者區 ── */
+.top-auth {
+  display: flex; align-items: center; gap: 8px;
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
+}
+.user-avatar {
+  width: 28px; height: 28px; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; line-height: 1;
+  color: var(--up); background: var(--up-bg);
+  border: 1px solid rgba(38, 208, 124, .45);
+  background-size: cover; background-position: center;
+}
+.user-email { font-size: 12px; color: var(--dim); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.signout-btn {
+  font-size: 11px; color: var(--dim);
+  padding: 3px 11px;
+  border: 1px solid var(--border); border-radius: 20px;
+  transition: color .12s, border-color .12s;
+}
+.signout-btn:hover:not(:disabled) { color: var(--down); border-color: rgba(246, 70, 93, .45); }
+.signout-btn:disabled { opacity: .5; cursor: default; }
+
+@media (max-width: 819.98px) {
+  .top-auth { order: 0; padding-right: 10px; border-right: 1px solid var(--border); }
+  .user-email { display: none; }
+  .signout-btn { min-height: 36px; }
+}
+

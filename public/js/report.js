@@ -3,7 +3,7 @@
    liquidated 紅色警示。關閉時可選 POST /api/report/ack（contract 標 optional）。 */
 
 import { state } from './state.js';
-import { $, el, fmtA, fmtA1, fmtPrice } from './util.js';
+import { $, el, fmtA, fmtA1, fmtPrice, api } from './util.js';
 
 let restApi = null;
 
@@ -14,7 +14,7 @@ export function initReportApi(transport) {
 }
 
 async function httpRest(path, method = 'GET', body = null) {
-  const r = await fetch(path, {
+  const r = await fetch(api(path), {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -38,7 +38,7 @@ export function initReport() {
 export async function fetchAndShowReport() {
   if (!restApi) return;
   try {
-    const j = await restApi(`/api/report?user=${encodeURIComponent(state.userId)}`);
+    const j = await restApi(`/api/report${state.userId == null ? '' : `?user=${encodeURIComponent(state.userId)}`}`);
     if (!j || j.until_tick == null || j.since_tick == null) return;
     // 無離線期間 → 不彈；明顯短暫的重連（<60s 且無事件）→ 不打擾
     const hasEvents = (j.triggers || []).length > 0 || !!j.liquidated;

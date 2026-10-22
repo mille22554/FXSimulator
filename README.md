@@ -1,14 +1,14 @@
-# FXSimulator — M1（市場引擎 + 帳戶 + CLI）＋ M2（HTTP API + WebSocket）＋ M3（離線規則 + 離線報告）
+# FXSimulator — M1（市場引擎 + 帳戶 + CLI）＋ M2（HTTP API + WebSocket）＋ M3（離線規則 + 離線報告 + Google 登入）
 
 依 `FXSimulator-Spec.md` **v0.25** 實作：
 
 - **M1 里程碑**：A/B 合成標的（CFD）的市場引擎、逐倉帳戶、強平與持倉費、SQLite 持久化、CLI 情境驗證。
 - **M2 里程碑**：Fastify HTTP API、WebSocket 即時協定、每秒 tick 迴圈，以及 **桌機交易頁**（走勢圖、下單面板、持倉、新聞看板；無建置步驟、無 CDN）。
-- **M3 里程碑（後端）**：**離線自動規則引擎**（§6.3 條件開倉，一次性、每帳號 2 條、0.1% 變差滑價、強平暫停）＋ **離線報告**（§6.4 收入 / 淨值高低 / 觸發明細 / 是否強平）。
+- **M3 里程碑（後端）**：**離線自動規則引擎**（§6.3 條件開倉，一次性、每帳號 2 條、0.1% 變差滑價、強平暫停）＋ **離線報告**（§6.4 收入 / 淨值高低 / 觸發明細 / 是否強平）＋ **Google 登入**（§6.1，`better-auth` cookie session）。
 
 - 純 ESM JavaScript（Node 20+），**無 TypeScript、無建置步驟**
 - 唯一原生相依套件：`better-sqlite3`（以動態 `import()` 載入，純邏輯測試可在原生模組缺席時執行）；
-  其餘為純 JS：`fastify`、`@fastify/websocket`、`@fastify/static`、`ws`
+  其餘為純 JS：`fastify`、`@fastify/websocket`、`@fastify/static`、`ws`、`better-auth`
 - 所有隨機性走 `src/rng.js`（mulberry32），**同種子可完全重播**
 - **經濟邏輯不使用 wall clock**：`tick_id` 是唯一真相
 
@@ -18,9 +18,10 @@
 
 ```bash
 npm install          # 需要 node-gyp（Python + C++ 工具鏈）才能建置 better-sqlite3
-npm test             # node --test
+npm test             # node --import ./scripts/dev-auth-env.js --test（68 個測試）
 npm start            # 啟動 HTTP + WebSocket 伺服器（127.0.0.1:2641）
 node src/cli.js init
+npm run migrate:auth # 建立 / 補齊 better-auth 的 ba_* 資料表
 ```
 
 Windows 上若 `better-sqlite3` 沒有對應 Node ABI 的預編譯檔，會退回 `node-gyp` 編譯，
@@ -39,7 +40,9 @@ npm 11.16+ 另有安裝腳本白名單機制，套件已於 `package.json` 的 `
 | `src/db.js` | §6.2 schema（WAL）、記憶體 store 與 SQLite store、save/load、**M3 欄位遷移** |
 | `src/engine.js` | tick 協調：事件+OU、分鐘 K 線、強平檢查、持久化；M2 加 `onEvent` / `onLiquidation` / `onPositionClosed` 通知鉤子；**M3** 加規則成交、期間淨值高低點追蹤 |
 | `src/serialize.js` | **M2**：唯一對外輸出的序列化層（狀態 / tick / 持倉 / K 線 / 事件；事件永不輸出 `type`、`permanent_share`）；**M3** 加 `rules` |
-| `src/api.js` | **M2**：REST 路由（`/healthz`、`/api/*`）＋ WebSocket `/ws` 協定處理；**M3** 加 `/api/rules`、`/api/report` 與 `rule.upsert` / `rule.delete` |
+| `src/api.js` | **M2**：REST 路由（`/healthz`、`/api/*`）＋ WebSocket `/ws` 協定處理；**M3** 加 `/api/rules`、`/api/report` 與 `rule.upsert` / `rule.delete`、**`/api/me`**（session → 本地使用者） |
+| `src/auth.js` | **M3**：`better-auth` 實例（Google provider、`ba_*` 表、`trustedOrigins`、每 IP 每日 3 次註冊上限）＋ `/api/auth/*` 掛載 |
+| `src/identity.js` | **M3**：session → 本地 `users.id`（`resolveUserId()`／`resolveLocalUser()`）、`DEV_AUTH` 旁路開關、`AuthError`（401 / 403） |
 | `src/live.js` | **M2**：live hub（連線登錄簿、每秒 tick 廣播、事件廣播、強平通知、漂移校正 tick 迴圈）；**M3** 加規則通知 |
 | `src/server.js` | **M2**：Fastify app（websocket + 靜態檔）、listen、優雅關機 |
 | `src/rules.js` | **M3**：條件開倉規則引擎（觸發判定、下一 tick 成交、變差滑價、失敗重試與冷卻、強平暫停、規則事件） |
@@ -47,16 +50,20 @@ npm 11.16+ 另有安裝腳本白名單機制，套件已於 `package.json` 的 `
 | `src/pct.js` | **M3**：`sl_pct` / `tp_pct` 百分比解析（M2 下單與 M3 規則共用） |
 | `src/scenarios.js` | §10 驗收情境（roundtrip / pump / liquidation / gap / opposing） |
 | `src/cli.js` | CLI：`init` `status` `tick` `open` `close` `candles` `events` `scenario` `reset` |
+| `scripts/migrate-auth.js` | **M3**：`getMigrations(auth.options).runMigrations()` → 建立 / 補齊 `ba_user` `ba_session` `ba_account` `ba_verification` ＋ `users.ba_user_id` |
+| `scripts/dev-auth-env.js` | 測試用（`node --import`）：設定 `DEV_AUTH=1` |
 | `public/` | **M2**：桌機交易頁（`index.html`、`styles.css`、`js/`；含 `?mock=1` 模擬模式） |
 | `test/api.test.js` | **M2**：REST + WebSocket 驗收（`fastify.inject` ＋ `ws`） |
 | `test/rules.test.js` | **M3**：規則 + 離線報告驗收（20 個） |
+| `test/auth.test.js` | **M3**：Google 登入 / session 驗收（16 個；**不真的打 Google**） |
 
 
 ## 前端（M2 桌機）
 
 - `npm start` 後開 `http://127.0.0.1:2641/`（nginx 上為 `https://morowin.win/FXSimulator/`）。
 - `?mock=1`：不連伺服器，用內建模擬資料預覽 UI（方便截圖與設計檢查）。
-- `?user=1`：M2 臨時使用者；M3 換成 Google session。
+- `?user=1`：M2 臨時使用者；**M3 起僅在 `DEV_AUTH=1`（非 production）時有效**，
+  正式環境一律以 Google session 為準。
 - 檔案：`public/index.html`、`public/styles.css`、`public/js/{app,chart,order,positions,news,state,ws,mock,util}.js`。
 - 無 CDN、無建置步驟；Canvas 2D；`prefers-reduced-motion` 與鍵盤 focus 已處理。
 
@@ -101,6 +108,7 @@ nginx 會剝掉 `/FXSimulator/` 前綴（`proxy_pass http://127.0.0.1:2641/`）�
 |------|------|------|
 | GET | `/healthz` | `{ ok, tick_id, uptime_s }` |
 | GET | `/api/config` | 槓桿選項、最小保證金、上限、費率 |
+| GET | `/api/me` | **M3**：`{ user: { id, email, name, avatar_url, role }, dev_auth }`；未登入 → 401 |
 | GET | `/api/state?user=1` | 完整狀態（market / account / positions / candles / events） |
 | GET | `/api/candles?limit=60` | 1 分 K，**最舊 → 最新**，上限 600 |
 | GET | `/api/events?limit=100` | 事件，**最新 → 最舊**；**永不**含 `type` / `permanent_share` |
@@ -190,13 +198,124 @@ create ──► active ──觸發──► triggered（一次性，結束）
 
 > 線上既有 DB 不需重建：啟動時會自動 `ALTER TABLE` 補上上表的新欄位（`src/db.js` 的 `MIGRATIONS`）。
 
-### 單位與認證（M2 臨時制）
+### 單位與認證（M3：session 制）
 
 - 金額一律**整數 milli-A**（`_milli`）、價格一律**整數 e4**（`_e4`）、百分比為小數比例。
 - `sl_pct` / `tp_pct` 依 contract 請求範例以**百分比數字**解讀（`0.5` = 0.5%）；
   若百分比解讀違反引擎限制而小數比例解讀合法，則自動改採小數比例（相容兩種前端寫法）。
-- 暫時無登入：使用者 id 取自 `?user=<id>` 或標頭 `x-user-id`，預設 `1`；
-  **全部集中在 `src/api.js` 的 `resolveUserId()`**，M3 換成 session cookie 時只改這一處。
+- **M3 起**：使用者 id 由 `src/identity.js` 的 `resolveUserId()` 解析（**唯一接點**）：
+  - 正式環境（`NODE_ENV=production`）：better-auth session → 本地 `users.id`；
+    無 session → **401**；`users.disabled = 1` → **403**。
+  - 開發環境（`NODE_ENV` 未設為 production）且 `DEV_AUTH=1`（預設開啟，`DEV_AUTH=0` 關閉）：
+    保留 M2 的 `?user=<id>` / `x-user-id` 旁路（僅供本機開發與測試）。
+
+---
+
+## M3 Google 登入（better-auth，§6.1）
+
+### 環境變數
+
+| 變數 | 預設 | 說明 |
+|------|------|------|
+| `GOOGLE_CLIENT_ID` | — | GCP OAuth Client（Web application） |
+| `GOOGLE_CLIENT_SECRET` | — | 同上 |
+| `BETTER_AUTH_SECRET` | — | **正式環境必填**（≥ 32 字元；未設 → 啟動直接失敗） |
+| `BETTER_AUTH_BASE_URL` | `https://morowin.win` | better-auth 的 `baseURL`，**只能放 origin**（不可含 `/FXSimulator`） |
+| `TRUSTED_ORIGINS` | — | 額外允許的 origin（逗號分隔） |
+| `ADMIN_EMAILS` | — | 命中者 `users.role = 'admin'`（逗號分隔） |
+| `NODE_ENV` | — | 正式環境**必須** `production`（否則 `DEV_AUTH` 旁路可用） |
+| `DEV_AUTH` | 開發時 `1` | `0` 關閉 `?user=` 旁路；**production 一律忽略** |
+
+> `.env` **不可 commit**（已在 `.gitignore` 的 `*.db` 之列者請自行加 `.env`）。
+
+### 端點
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| ANY | `/api/auth/*` | better-auth 路由（`sign-in/social`、`callback/google`、`sign-out`、`get-session`…） |
+| GET | `/api/me` | `{ user: { id, email, name, avatar_url, role }, dev_auth }`；無 session → **401** `{ error: 'unauthorized' }`；`disabled` → **403** |
+
+登入（前端）：
+
+```js
+const r = await fetch('/api/auth/sign-in/social', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  credentials: 'include',
+  body: JSON.stringify({ provider: 'google', callbackURL: location.href }),
+});
+const { url, redirect } = await r.json();
+if (redirect) location.href = url;
+```
+
+登出：`POST /api/auth/sign-out`（`credentials: 'include'`）→ 重整。
+
+### 本地帳號連結（§6.2）
+
+- better-auth 自己的表：`ba_user` / `ba_session` / `ba_account` / `ba_verification`
+  （**不要**把 better-auth 指向既有的 `accounts` 表 —— 那是資產表，`user_id` 是 INTEGER）。
+- 本地 `users` 新增 `ba_user_id TEXT`（unique index `idx_users_ba_user_id`，可空）
+  ＋既有的 `google_sub`（UNIQUE）。
+- **唯一鍵是 Google `sub`**（email 可變）：
+  1. 先用 `users.ba_user_id` 找；
+  2. 找不到就用 `ba_account.accountId`（Google `sub`）找 `users.google_sub` → 找到就**連結**（不另建角色）；
+  3. 再找不到 → **建立** `users` ＋ `accounts`（`balance_milli = 100,000,000` = 100,000 A），
+     同一個交易（transaction）內完成；之後不再發放。
+- 只接受 `email_verified = true` 的 Google 帳號（`user.validateUserInfo` 檢查原始 profile）。
+- `users.disabled = 1` → 403。
+
+### 註冊次數限制
+
+- 每 IP 每日最多 **3 次**「開始註冊／登入」（`POST /api/auth/sign-in/social`）。
+- IP 判定順序：`CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For[0]`。
+  ⚠️ nginx 的 `X-Real-IP` 是 cloudflared 的來源 IP（不是玩家 IP），**真實判定靠 Cloudflare 注入的 `CF-Connecting-IP`**。
+- 計數存在行程記憶體（單 process；重啟歸零）。
+
+### nginx 必要設定
+
+```nginx
+location /FXSimulator/ {
+    proxy_pass http://127.0.0.1:2641/;
+    proxy_http_version 1.1;
+
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;      # 建議（CF-Connecting-IP 才是真實 IP）
+    # Origin / CF-Connecting-IP 由 nginx 預設原樣轉送
+
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
+```
+
+- Google redirect URI（**必須完全一致**）：
+  `https://morowin.win/FXSimulator/api/auth/callback/google`
+- Cookie：`Path=/`（nginx 剝掉 `/FXSimulator/` 前綴）、`HttpOnly`、`SameSite=Lax`、
+  `Secure`（僅 production）。
+
+### 部署順序
+
+```bash
+# 1. 載入環境變數（正式機）
+set -a; . /opt/fxsimulator/.env; set +a
+
+# 2. 跑 migration（必須在開流量前完成）
+node scripts/migrate-auth.js /opt/fxsimulator/fxsim.db
+
+# 3. 啟動服務（systemd 需設 NODE_ENV=production）
+systemctl restart fxsim
+```
+
+> `better-auth` 1.7.3+ 會驗證 schema；缺表時請求會直接失敗。
+> 伺服器啟動時也會自動跑一次（冪等）；設 `FXSIM_AUTO_MIGRATE=0` 可關閉
+> （或 `buildServer({ migrateAuth: false })`）。
+
+---
 
 ### 優雅關機
 
@@ -306,8 +425,10 @@ P      = P_base × (1 + 0.2 × tanh(N / L))
 npm test
 ```
 
-`node --test`（無框架、無 watch）。共 **51 個測試**：M1 的 15 個（規格要求 10 個 + 5 個補充）
-＋ M2 的 16 個（REST / WebSocket）＋ M3 的 20 個（規則與離線報告）。
+`node --import ./scripts/dev-auth-env.js --test`（無框架、無 watch）。共 **68 個測試**：
+M1 的 15 個（規格要求 10 個 + 5 個補充）＋ M2 的 16 個（REST / WebSocket）
+＋ M3 的 20 個（規則與離線報告）＋ M3 的 17 個（Google 登入 / session）。
+測試時 `DEV_AUTH=1`（由 `scripts/dev-auth-env.js` 注入），讓既有的 51 個測試維持 M2 的 `?user=` 行為。
 
 ### M1（15 個）
 
@@ -379,9 +500,34 @@ npm test
 （M1 純邏輯測試仍會跑）。每個 M2 測試都使用**全新的暫存 DB**，且**不啟動真實 tick 迴圈**
 （`buildServer({ live: false })`），需要時間推進時由測試手動呼叫 `engine.tick()`。
 
+### M3 認證（17 個，`test/auth.test.js`）
+
+| # | 測試 | 對應規格 |
+|---|------|---------|
+| G1 | 未登入 `GET /api/state` → 401（`DEV_AUTH=0`） | §10 登入與註冊 |
+| G2 | 未登入 `GET /api/me` → 401 | §6.1 / 前端啟動流程 |
+| G3 | 未登入 `POST /api/open` → 401 | §6.1 |
+| G4 | `DEV_AUTH=1` → `GET /api/state?user=1` → 200（既有測試行為） | §8.2 |
+| G5 | `DEV_AUTH=1` → `GET /api/me` 回 `dev_auth: true` | 前端啟動流程 |
+| G6 | `devAuthEnabled()`：production 一律 false、`DEV_AUTH=0` → false | §6.1 |
+| G7 | WS：未登入 → `close(1008)` | §8.1 |
+| G8 | WS：`DEV_AUTH=1` → 連線成功並收到 `snapshot` | §8.1 |
+| G9 | better-auth migration 冪等 ＋ `ba_*` 四張表存在 | §6.2 / 部署 |
+| G10 | `users.ba_user_id` 欄位 ＋ unique index 存在 | §6.2 |
+| G11 | 首次 Google 登入 → 建立本地 `users` ＋ `accounts`（100,000 A）；再次登入不重複發放 | §6.2 / §10 |
+| G12 | 既有本地帳號（`google_sub`）→ 登入時被連結，不另建角色 | §6.1 |
+| G13 | `users.disabled = 1` → 403 | §6.1 / §10 |
+| G14 | session 有效時回本地 `users.id`（整數），不是 better-auth 的 uuid | §6.2 |
+| G15 | `/api/auth/get-session` 無 cookie → `null` | §6.1 |
+| G16 | 每 IP 每日「開始註冊/登入」上限 3 次 | §6.1 / §10 |
+| G17 | 第 4 次「開始註冊/登入」→ **429**（上限真的擋得住） | §6.1 / §10 |
+
+> **不真的打 Google**：session 相關的測試用 stub（假的 `auth.api.getSession`），
+> 或直接插入 `ba_user` / `ba_account` 列模擬「已登入」狀態。
+
 ## 尚未包含（M3 剩餘範圍）
 
-- Google 登入與 session（§6.1，M2 為臨時 `?user=` 認證）
 - 手機版 UI（§7.3；M2 只做桌機）—— M3 **後端**已完成，前端由另一條 lane 處理
+- 登入頁 UI（§7.1 / §10「未登入顯示登入頁」）—— 前端由另一條 lane 處理
 - 條件平倉、時間到平倉、移動停損（§6.3，M3 只做條件開倉）
 - 排行榜、破產重整（post-alpha）

@@ -395,8 +395,9 @@ export function createMockServer(opts = {}) {
     };
   }
 
-  /** mock REST shim：契約 REST 端點由模擬伺服器代答（不經 fetch） */
-  function handleRest(path, method = 'GET', body = {}) {
+  /** mock REST shim：契約 REST 端點由模擬伺服器代答（不經 fetch；路徑剝掉 query） */
+  function handleRest(rawPath, method = 'GET', body = {}) {
+    const path = String(rawPath || '').split('?')[0];
     if (method === 'GET' && path.startsWith('/api/rules')) {
       return { max_active: 2, rules: rules.map(serializeRule) };
     }

@@ -4,6 +4,7 @@
  * REST：
  *   GET  /healthz
  *   GET  /api/config
+ *   GET  /api/me                    （M3：session → 本地使用者；無 session → 401）
  *   GET  /api/state?user=1
  *   GET  /api/candles?limit=60      （最舊 → 最新，上限 600）
  *   GET  /api/events?limit=100      （最新 → 最舊；**絕不**含 type / permanent_share）
@@ -13,14 +14,15 @@
  * WebSocket：
  *   /ws?user=1 → 立即 `snapshot`，之後每秒 `tick`；接受 `order.open` / `order.close` / `ping`。
  *
- * M2 臨時認證（M3 會換成 session cookie）：
- *   使用者 id 由 `?user=<id>` 或標頭 `x-user-id` 決定，預設 1。
- *   **全部集中在 `resolveUserId()`**，M3 只要換掉這一個函式即可。
+ * M3 認證（session cookie）：
+ *   使用者 id 由 `resolveUserId()` 解析（`src/identity.js`）：
+ *     - `DEV_AUTH=1`（僅非 production）→ 保留 M2 的 `?user=` / `x-user-id`。
+ *     - 否則 → better-auth session → 本地 `users.id`；無 session → 401；
+ *       `users.disabled = 1` → 403。
  */
 
 import {
   DEFAULT_LEVERAGE,
-  DEFAULT_USER_ID,
   FEE_LONG_ANNUAL,
   FEE_SHORT_ANNUAL,
   LEVERAGE_OPTIONS,
@@ -35,28 +37,20 @@ import { markE4, positionJson, stateJson } from './serialize.js';
 import { resolvePct } from './pct.js';
 import { ruleJson } from './rules.js';
 import { WS_OPEN } from './live.js';
+import {
+  AuthError,
+  devAuthEnabled,
+  getSession,
+  resolveLocalUser,
+  resolveUserId,
+  userJson,
+} from './identity.js';
+
+export { resolveUserId, AuthError, devAuthEnabled };
 
 // ---------------------------------------------------------------------------
-// 使用者解析（M2 臨時認證；M3 只改這裡）
+// 使用者解析（M3：session-based；實作在 `src/identity.js`）
 // ---------------------------------------------------------------------------
-function firstDefined(...values) {
-  for (const v of values) {
-    if (v !== undefined && v !== null && v !== '') return v;
-  }
-  return undefined;
-}
-
-/** 從 query / body / header 解析使用者 id（無效或缺省 → 1） */
-export function resolveUserId(req) {
-  const raw = firstDefined(
-    req?.query?.user,
-    req?.body?.user,
-    req?.headers?.['x-user-id'],
-  );
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) return DEFAULT_USER_ID;
-  return n;
-}
 
 // ---------------------------------------------------------------------------
 // 錯誤原因（穩定機器字串）
@@ -155,8 +149,45 @@ export function registerApi(app, ctx) {
     };
   });
 
+  // ------------------------------------------------------------------
+  // M3：目前使用者（spec §6.1 / m3-auth.md §4）
+  //   - 無 session → 401 { error: 'unauthorized' }
+  //   - 有 session → { user: { id, email, name, avatar_url, role }, dev_auth: false }
+  //   - DEV_AUTH 模式 → { user: {...}, dev_auth: true }（前端才允許 `?user=`）
+  // ------------------------------------------------------------------
+  app.get('/api/me', async (req, reply) => {
+    if (devAuthEnabled()) {
+      const userId = await resolveUserId(req, ctx);
+      const row = ctx.store?.findUserById?.(userId) ?? null;
+      return {
+        user:
+          userJson(row) ?? {
+            id: userId,
+            email: null,
+            name: '開發者',
+            avatar_url: null,
+            role: 'player',
+          },
+        dev_auth: true,
+      };
+    }
+
+    const session = await getSession(req, ctx.auth);
+    if (!session) {
+      return reply.code(401).send({ ok: false, error: 'unauthorized' });
+    }
+    const local = await resolveLocalUser(session, ctx);
+    if (!local) {
+      return reply.code(401).send({ ok: false, error: 'unauthorized' });
+    }
+    if (local.disabled) {
+      return reply.code(403).send({ ok: false, error: 'disabled' });
+    }
+    return { user: userJson(local), dev_auth: false };
+  });
+
   app.get('/api/state', async (req) => {
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     return stateJson({ engine, userId });
   });
 
@@ -190,7 +221,7 @@ export function registerApi(app, ctx) {
 
   app.post('/api/open', async (req) => {
     const body = req?.body ?? {};
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     const parsed = parseOrderInput(body);
     if (parsed.error) return { ok: false, reason: parsed.error };
 
@@ -213,7 +244,7 @@ export function registerApi(app, ctx) {
 
   app.post('/api/close', async (req) => {
     const body = req?.body ?? {};
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     const positionId = Number(body.position_id ?? body.positionId);
     if (!Number.isInteger(positionId)) return { ok: false, reason: 'not_found' };
 
@@ -231,7 +262,7 @@ export function registerApi(app, ctx) {
   // M3：自動規則（§6.3）
   // ------------------------------------------------------------------
   app.get('/api/rules', async (req) => {
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     return {
       max_active: MAX_ACTIVE_RULES,
       rules: engine.rules.listFor(userId).map(ruleJson),
@@ -240,7 +271,7 @@ export function registerApi(app, ctx) {
 
   app.post('/api/rules', async (req) => {
     const body = req?.body ?? {};
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     const result = engine.rules.createRule(userId, body);
     if (!result.ok) return { ok: false, reason: result.reason };
     return { ok: true, rule: ruleJson(result.rule) };
@@ -248,7 +279,7 @@ export function registerApi(app, ctx) {
 
   app.patch('/api/rules/:id', async (req) => {
     const body = req?.body ?? {};
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     const id = Number(req?.params?.id);
     if (!Number.isInteger(id)) return { ok: false, reason: 'not_found' };
 
@@ -263,7 +294,7 @@ export function registerApi(app, ctx) {
   });
 
   app.delete('/api/rules/:id', async (req) => {
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     const id = Number(req?.params?.id);
     if (!Number.isInteger(id)) return { ok: false, reason: 'not_found' };
     const result = engine.rules.cancelRule(userId, id);
@@ -275,7 +306,7 @@ export function registerApi(app, ctx) {
   // M3：離線報告（§6.4）
   // ------------------------------------------------------------------
   app.get('/api/report', async (req) => {
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     // `scope=live`＝直接用目前的 last_seen_tick 往後算；預設＝最近一次連線時的離線報告
     const scope = req?.query?.scope === 'live' ? 'live' : 'offline';
     return engine.reports.get(userId, { scope });
@@ -283,12 +314,16 @@ export function registerApi(app, ctx) {
 
   app.post('/api/report/ack', async (req) => {
     // 使用者可由 query / body 的 `user` 指定（UI 傳 body: { user }）
-    const userId = resolveUserId(req);
+    const userId = await resolveUserId(req, ctx);
     engine.reports.ack(userId);
     return { ok: true };
   });
 
   app.setErrorHandler((err, req, reply) => {
+    // M3：認證錯誤（401 / 403）
+    if (err instanceof AuthError || err?.name === 'AuthError') {
+      return reply.code(err.status ?? 401).send({ ok: false, error: err.error ?? 'unauthorized' });
+    }
     reply.code(400).send({ ok: false, reason: 'invalid_request', message: err?.message });
   });
 
@@ -309,8 +344,24 @@ function clampLimit(raw, fallback, max) {
 export function registerWs(app, ctx) {
   const { engine, hub } = ctx;
 
-  app.get('/ws', { websocket: true }, (socket, req) => {
-    const userId = resolveUserId(req);
+  app.get('/ws', { websocket: true }, async (socket, req) => {
+    // M3：WS handshake 也要驗 session（m3-auth.md §4）
+    //   - DEV_AUTH=1（僅非 production）→ 允許 `?user=`
+    //   - 否則必須有 session；沒有 → close(1008)
+    let userId;
+    try {
+      userId = await resolveUserId(req, ctx);
+    } catch (err) {
+      // 1008 = Policy Violation（未登入 / 帳號停用）
+      const reason = err?.status === 403 ? 'forbidden' : 'unauthorized';
+      try {
+        socket.close(1008, reason);
+      } catch {
+        /* 連線可能已關閉 */
+      }
+      return;
+    }
+
     const client = {
       userId,
       sendText: (text) => {

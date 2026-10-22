@@ -1,19 +1,21 @@
-/* app.js — 進入點：讀 config → 連線（?mock=1 或 /ws?user=<id>）→ snapshot 接管狀態 →
-   tick 1Hz 重繪、下單送出（WS order.open／order.close）→ toast／橫幅／連線狀態。 */
+/* app.js — 進入點：登入閘門（/api/me；M3）→ 讀 config → 連線（?mock=1 或 /ws）→
+   snapshot 接管狀態 → tick 1Hz 重繪、下單送出（WS order.open／order.close）→
+   toast／橫幅／連線狀態。未登入一律不初始化交易 WS。 */
 
 import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming } from './state.js';
 import { createTransport } from './ws.js';
+import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js';
 import { Chart } from './chart.js';
 import { initOrderPanel, refreshOnTick } from './order.js';
 import { initPositions, renderPositions } from './positions.js';
 import { initNews, renderNews, maybeBanner } from './news.js';
 import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js';
 import { initReport, initReportApi, fetchAndShowReport } from './report.js';
-import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned } from './util.js';
+import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js';
 
 const params = new URLSearchParams(location.search);
 state.isMock = params.get('mock') === '1';
-state.userId = params.get('user') || '1';
+const wantUserParam = params.get('user'); // M3：等 /api/me 確認 dev_auth 後才套用
 
 const MOCK_CONFIG = {
   leverage: [1, 2, 5, 10, 20, 50, 100],
@@ -72,6 +74,7 @@ function setConn(status, attempt, wait) {
       text.textContent = `重連中（第 ${attempt || 1} 次，${Math.round((wait || 1000) / 1000)}s）`;
       break;
     case 'offline': badge.classList.add('conn-offline'); text.textContent = '離線'; break;
+    case 'unauthorized': badge.classList.add('conn-offline'); text.textContent = '未授權'; break;
     default: badge.classList.add('conn-connecting'); text.textContent = '連線中…';
   }
 }
@@ -259,7 +262,7 @@ function advanceTickWallclock() { /* state.serverNow 已於 applyTick 更新 */ 
 async function loadRestBootstrap(snapData) {
   try {
     if (!snapData.candles || snapData.candles.length < 60) {
-      const r = await fetch(`/api/candles?limit=60`);
+      const r = await fetch(api('/api/candles?limit=60'));
       if (r.ok) {
         const arr = await r.json();
         state.candles = arr.slice(-600);
@@ -268,7 +271,7 @@ async function loadRestBootstrap(snapData) {
       }
     }
     if (!snapData.events || !snapData.events.length) {
-      const r = await fetch(`/api/events?limit=100`);
+      const r = await fetch(api('/api/events?limit=100'));
       if (r.ok) {
         const arr = await r.json();
         state.events = arr.slice(0, 100);
@@ -322,8 +325,43 @@ function initModeTabs() {
   });
 }
 
+/* ── M3：/api/me 確認 dev_auth 後才允許 ?user=；其他一律純 session ── */
+function applyUserId() {
+  state.devAuth = isDevAuth();
+  state.userId = state.devAuth ? (wantUserParam || '1') : null;
+}
+
+/* ── M3：WS handshake 因未授權被關（1008）──
+   先向 /api/me 覆核：session 仍有效時不誤登出（例如 ?user= 被伺服器拒絕）；
+   session 真的失效 → 清使用者、停止重連、顯示登入遮罩。 */
+let wsAuthHandled = false;
+async function handleWsUnauthorized() {
+  if (wsAuthHandled) return;
+  wsAuthHandled = true;
+  try { transport && transport.close(); } catch { /* noop */ }
+  setConn('unauthorized');
+  const me = await fetchMe();
+  if (me.ok && me.user) { // session 仍有效，僅交易連線被拒（如 ?user= 未核可）
+    toast('err', '交易連線被伺服器拒絕，請確認帳號權限後重新整理頁面。');
+    state.devAuth = false;
+    state.userId = null;
+    return;
+  }
+  state.pendingOrders.clear();
+  state.devAuth = false;
+  state.user = null;
+  showLogin('登入狀態已失效，請重新登入。');
+}
+
 /* ── boot ── */
 async function boot() {
+  /* ── 登入閘門：先確認使用者，未登入就停在遮罩、不初始化交易 WS ── */
+  const authOk = await initAuthApp(state.isMock, wantUserParam);
+  if (!authOk) return;
+  applyUserId();
+  state.user = currentUser(); // 顯示由 auth.js（topAuth）管理，state.user 備查
+  wsAuthHandled = false;
+
   initModeTabs();
 
   // config：mock 用常數；真實取 /api/config
@@ -331,7 +369,7 @@ async function boot() {
     state.config = MOCK_CONFIG;
   } else {
     try {
-      const r = await fetch('/api/config');
+      const r = await fetch(api('/api/config'));
       state.config = r.ok ? await r.json() : MOCK_CONFIG;
     } catch { state.config = MOCK_CONFIG; }
   }
@@ -350,6 +388,7 @@ async function boot() {
     mock: state.isMock,
     userId: state.userId,
     mockOpts: { forceReport: params.get('report') === 'liq' ? 'liq' : params.get('report') === '1' ? 'report' : null },
+    onUnauthorized: handleWsUnauthorized,
     onStatus: (s, n, w) => {
       // 重連成功 → 下一個 snapshot 以 REST 資料覆蓋重建（規格 §7.6 斷線重連）
       if (s === 'online' && state.connectedOnce) wasReconnect = true;

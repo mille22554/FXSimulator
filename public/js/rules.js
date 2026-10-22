@@ -4,7 +4,7 @@
    觸發價與現價距離 <0.05% → 警示「會立刻成交；後端會以 trigger_too_close 拒絕。 */
 
 import { state } from './state.js';
-import { $, $$, el, fmtA, fmtPrice, priceE4 } from './util.js';
+import { $, $$, el, fmtA, fmtPrice, priceE4, api } from './util.js';
 
 const TRIGGER_TOO_CLOSE_PCT = 0.0005; // 0.05%
 
@@ -49,7 +49,7 @@ export function initRulesApi(transport) {
 }
 
 async function httpRest(path, method = 'GET', body = null) {
-  const r = await fetch(path, {
+  const r = await fetch(api(path), {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -59,11 +59,12 @@ async function httpRest(path, method = 'GET', body = null) {
 
 export function setRulesWsSender(fn) { wsSend = fn; }
 
-/* GET /api/rules?user=1 → { max_active, rules } */
+/* GET /api/rules → { max_active, rules }；?user= 僅 dev_auth 模式帶 */
 export async function loadRules() {
   if (!restApi) return;
   try {
-    const j = await restApi(`/api/rules?user=${encodeURIComponent(state.userId)}`);
+    const qs = state.userId == null ? '' : `?user=${encodeURIComponent(state.userId)}`;
+    const j = await restApi(`/api/rules${qs}`);
     if (j && Array.isArray(j.rules)) {
       rulesStore.max_active = j.max_active || 2;
       rulesStore.rules = j.rules;

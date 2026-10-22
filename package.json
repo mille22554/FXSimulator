@@ -1,23 +1,28 @@
-{
+﻿{
   "name": "fxsim-m1",
   "version": "0.3.0",
   "private": true,
-  "description": "FXSimulator M3 - market engine + REST API + WebSocket + offline conditional-order rules & report (frontend served from public/)",
+  "description": "FXSimulator M3 - market engine + REST API + WebSocket + offline conditional-order rules & report + Google login (better-auth) (frontend served from public/)",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --import ./scripts/dev-auth-env.js --test",
     "start": "node src/server.js",
-    "cli": "node src/cli.js"
+    "cli": "node src/cli.js",
+    "migrate:auth": "node scripts/migrate-auth.js"
   },
   "dependencies": {
     "@fastify/static": "^10.1.6",
     "@fastify/websocket": "^11.3.4",
-    "better-sqlite3": "^11",
+    "better-auth": "1.7.12",
+    "better-sqlite3": "11.10.0",
     "fastify": "^5.12.7",
     "ws": "^8"
+  },
+  "overrides": {
+    "kysely": "0.28.18"
   },
   "allowScripts": {
     "better-sqlite3": true

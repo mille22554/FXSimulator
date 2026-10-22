@@ -32,7 +32,11 @@ export function ensureUserAccount(engine, userId) {
   const acct = engine.ensureAccount(userId);
   if (!existed) {
     try {
-      engine.store?.saveUser?.({ id: userId, created_at: engine.ticksExecuted });
+      // M3：Google 帳號的 users 列已存在（含 ba_user_id / google_sub）→ 不可用預設值覆蓋
+      const existing = engine.store?.findUserById?.(userId);
+      if (!existing) {
+        engine.store?.saveUser?.({ id: userId, created_at: engine.ticksExecuted });
+      }
       engine.store?.saveAccount?.({
         user_id: userId,
         balance_milli: acct.balanceMilli,

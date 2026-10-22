@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS users (
   avatar_url     TEXT,
   disabled       INTEGER NOT NULL DEFAULT 0,
   role           TEXT NOT NULL DEFAULT 'player',
-  created_at     INTEGER NOT NULL DEFAULT 0
+  created_at     INTEGER NOT NULL DEFAULT 0,
+  -- M3：better-auth 的使用者 id（ba_user.id，uuid 字串）→ 本地帳號的連結鍵
+  ba_user_id     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS accounts (
@@ -157,6 +159,8 @@ CREATE INDEX IF NOT EXISTS idx_trades_user_tick_id  ON trades(user_id, tick_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_user_tick_id  ON ledger(user_id, tick_id);
 CREATE INDEX IF NOT EXISTS idx_rules_user_status    ON rules(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_rule_events_user_tick ON rule_events(user_id, tick_id);
+-- M3：better-auth user id 唯一（nullable → SQLite 允許多個 NULL）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ba_user_id ON users(ba_user_id);
 `;
 
 /** 完整 schema（建表 + 索引）；供外部工具一次執行 */
@@ -193,6 +197,10 @@ export const MIGRATIONS = {
     last_notified_tick: 'INTEGER',
     pending_tick: 'INTEGER',
     position_id: 'INTEGER',
+  },
+  // M3：better-auth session 與本地帳號的連結鍵
+  users: {
+    ba_user_id: 'TEXT',
   },
 };
 
@@ -305,10 +313,83 @@ export function createMemoryStore() {
         .sort((a, b) => a.tickId - b.tickId || a.id - b.id);
     },
     saveUser(u) {
-      this._users.set(u.id, { ...u });
+      const prev = this._users.get(u.id) ?? {};
+      const next = { ...prev, ...u };
+      // 已連結 Google 的欄位不被「預設值」覆蓋（saveUser 只帶 { id, created_at }）
+      if (prev.ba_user_id && !u.ba_user_id) next.ba_user_id = prev.ba_user_id;
+      if (prev.google_sub && !u.google_sub) next.google_sub = prev.google_sub;
+      if (prev.email && !u.email) next.email = prev.email;
+      if (prev.display_name && !u.display_name) next.display_name = prev.display_name;
+      if (prev.avatar_url && !u.avatar_url) next.avatar_url = prev.avatar_url;
+      if (prev.role && !u.role) next.role = prev.role;
+      this._users.set(u.id, next);
     },
     loadUsers() {
       return [...this._users.values()];
+    },
+    // ---------------------------------------------- M3：better-auth 連結
+    findUserById(id) {
+      return this._users.get(id) ?? null;
+    },
+    findUserByBaUserId(baUserId) {
+      for (const u of this._users.values()) if (u.ba_user_id === baUserId) return u;
+      return null;
+    },
+    findUserByGoogleSub(sub) {
+      if (!sub) return null;
+      for (const u of this._users.values()) if (u.google_sub === sub) return u;
+      return null;
+    },
+    linkBaUserId(userId, baUserId) {
+      const u = this._users.get(userId);
+      if (!u) return null;
+      u.ba_user_id = baUserId;
+      return u;
+    },
+    updateUserProfile(userId, { displayName, avatarUrl } = {}) {
+      const u = this._users.get(userId);
+      if (!u) return null;
+      if (displayName) u.display_name = displayName;
+      if (avatarUrl) u.avatar_url = avatarUrl;
+      return u;
+    },
+    /** 記憶體 store 沒有 `ba_*` 表 → 拿不到 Google `sub` */
+    getProviderAccountId() {
+      return null;
+    },
+    createLocalUserWithAccount({
+      baUserId = null,
+      googleSub = null,
+      email = null,
+      displayName = null,
+      avatarUrl = null,
+      role = 'player',
+      balanceMilli = 0,
+      tick = 0,
+    } = {}) {
+      let nextId = 1;
+      for (const u of this._users.keys()) if (u >= nextId) nextId = u + 1;
+      const user = {
+        id: nextId,
+        ba_user_id: baUserId,
+        google_sub: googleSub,
+        email,
+        email_verified: 1,
+        display_name: displayName,
+        avatar_url: avatarUrl,
+        disabled: 0,
+        role,
+        created_at: new Date().toISOString(),
+      };
+      this._users.set(nextId, user);
+      this._accounts.set(nextId, {
+        user_id: nextId,
+        balance_milli: balanceMilli,
+        settled_tick_id: tick,
+        last_settled_tick: tick,
+        created_at: tick,
+      });
+      return user;
     },
     saveLedger(l) {
       this._ledger.push(l);
@@ -340,12 +421,17 @@ class SqliteStore {
     this.init(); // 先建表，再準備 statement
     this.stmt = {
       upsertUser: db.prepare(
-        `INSERT INTO users (id, google_sub, email, email_verified, display_name, avatar_url, disabled, role, created_at)
-         VALUES (@id, @google_sub, @email, @email_verified, @display_name, @avatar_url, @disabled, @role, @created_at)
+        `INSERT INTO users (id, google_sub, email, email_verified, display_name, avatar_url, disabled, role, created_at, ba_user_id)
+         VALUES (@id, @google_sub, @email, @email_verified, @display_name, @avatar_url, @disabled, @role, @created_at, @ba_user_id)
          ON CONFLICT(id) DO UPDATE SET
-           google_sub=excluded.google_sub, email=excluded.email, email_verified=excluded.email_verified,
-           display_name=excluded.display_name, avatar_url=excluded.avatar_url, disabled=excluded.disabled,
-           role=excluded.role`,
+           google_sub=CASE WHEN users.ba_user_id IS NOT NULL THEN users.google_sub ELSE excluded.google_sub END,
+           email=CASE WHEN users.ba_user_id IS NOT NULL THEN users.email ELSE excluded.email END,
+           email_verified=MAX(users.email_verified, excluded.email_verified),
+           display_name=CASE WHEN users.ba_user_id IS NOT NULL THEN users.display_name ELSE excluded.display_name END,
+           avatar_url=CASE WHEN users.ba_user_id IS NOT NULL THEN users.avatar_url ELSE excluded.avatar_url END,
+           disabled=MAX(users.disabled, excluded.disabled),
+           role=CASE WHEN excluded.role = 'player' THEN users.role ELSE excluded.role END,
+           ba_user_id=COALESCE(users.ba_user_id, excluded.ba_user_id)`,
       ),
       upsertAccount: db.prepare(
         `INSERT INTO accounts (user_id, balance_milli, settled_tick_id, last_settled_tick, created_at)
@@ -438,6 +524,21 @@ class SqliteStore {
       accounts: db.prepare(`SELECT * FROM accounts`),
       accountById: db.prepare(`SELECT * FROM accounts WHERE user_id = ?`),
       users: db.prepare(`SELECT * FROM users`),
+      userById: db.prepare(`SELECT * FROM users WHERE id = ?`),
+      userByBaUserId: db.prepare(`SELECT * FROM users WHERE ba_user_id = ?`),
+      userByGoogleSub: db.prepare(`SELECT * FROM users WHERE google_sub = ?`),
+      setBaUserId: db.prepare(`UPDATE users SET ba_user_id = ? WHERE id = ?`),
+      updateUserProfile: db.prepare(
+        `UPDATE users SET display_name = COALESCE(?, display_name), avatar_url = COALESCE(?, avatar_url) WHERE id = ?`,
+      ),
+      insertLocalUser: db.prepare(
+        `INSERT INTO users (google_sub, email, email_verified, display_name, avatar_url, disabled, role, created_at, ba_user_id)
+         VALUES (@google_sub, @email, @email_verified, @display_name, @avatar_url, @disabled, @role, @created_at, @ba_user_id)`,
+      ),
+      insertLocalAccount: db.prepare(
+        `INSERT INTO accounts (user_id, balance_milli, settled_tick_id, last_settled_tick, created_at)
+         VALUES (@user_id, @balance_milli, @settled_tick_id, @last_settled_tick, @created_at)`,
+      ),
       ledger: db.prepare(`SELECT * FROM ledger ORDER BY id DESC LIMIT ?`),
       tradesRange: db.prepare(
         `SELECT id, kind, tick_id, price_e4, notional_milli FROM trades
@@ -617,11 +718,107 @@ class SqliteStore {
       disabled: u.disabled ?? 0,
       role: u.role ?? 'player',
       created_at: u.created_at ?? 0,
+      ba_user_id: u.ba_user_id ?? null,
     });
   }
 
   loadUsers() {
     return this.stmt.users.all();
+  }
+
+  // ---------------------------------------------- M3：better-auth 連結
+  /** 本地 users 列（依 id） */
+  findUserById(id) {
+    return this.stmt.userById.get(id) ?? null;
+  }
+
+  /** 依 better-auth user id（`ba_user.id`）找本地帳號 */
+  findUserByBaUserId(baUserId) {
+    if (!baUserId) return null;
+    return this.stmt.userByBaUserId.get(baUserId) ?? null;
+  }
+
+  /** 依 Google `sub` 找本地帳號（唯一鍵） */
+  findUserByGoogleSub(sub) {
+    if (!sub) return null;
+    return this.stmt.userByGoogleSub.get(sub) ?? null;
+  }
+
+  /** 把既有本地帳號連結到 better-auth user id */
+  linkBaUserId(userId, baUserId) {
+    this.stmt.setBaUserId.run(baUserId, userId);
+    return this.stmt.userById.get(userId) ?? null;
+  }
+
+  /** 同步顯示名稱／頭像（email 可變，不在此更新） */
+  updateUserProfile(userId, { displayName, avatarUrl } = {}) {
+    this.stmt.updateUserProfile.run(displayName ?? null, avatarUrl ?? null, userId);
+    return this.stmt.userById.get(userId) ?? null;
+  }
+
+  /**
+   * 取 Google `sub`（存在 `ba_account.account_id`）。
+   * 欄位名以 `PRAGMA table_info` 實際結果為準（snake_case / camelCase 皆可）。
+   */
+  getProviderAccountId(baUserId, providerId = 'google') {
+    if (!baUserId) return null;
+    try {
+      const cols = this.db.prepare(`PRAGMA table_info(ba_account)`).all().map((c) => c.name);
+      if (!cols.length) return null;
+      const pick = (a, b) => (cols.includes(a) ? a : b);
+      const accCol = pick('account_id', 'accountId');
+      const provCol = pick('provider_id', 'providerId');
+      const userCol = pick('user_id', 'userId');
+      const row = this.db
+        .prepare(
+          `SELECT ${accCol} AS aid FROM ba_account WHERE ${userCol} = ? AND ${provCol} = ? LIMIT 1`,
+        )
+        .get(baUserId, providerId);
+      return row?.aid ?? null;
+    } catch {
+      return null; // `ba_account` 尚未建立（migration 未跑）
+    }
+  }
+
+  /**
+   * 首次登入：建立本地 `users` + `accounts`（同一交易，100,000 A = 100,000,000 milli-A）。
+   * @returns {object} 新建的 users 列
+   */
+  createLocalUserWithAccount({
+    baUserId = null,
+    googleSub = null,
+    email = null,
+    displayName = null,
+    avatarUrl = null,
+    role = 'player',
+    balanceMilli = 0,
+    tick = 0,
+  } = {}) {
+    const createdAt = new Date().toISOString();
+    const run = this.db.transaction(() => {
+      const info = this.stmt.insertLocalUser.run({
+        google_sub: googleSub,
+        email,
+        email_verified: 1,
+        display_name: displayName,
+        avatar_url: avatarUrl,
+        disabled: 0,
+        role,
+        created_at: createdAt,
+        ba_user_id: baUserId,
+      });
+      const userId = Number(info.lastInsertRowid);
+      this.stmt.insertLocalAccount.run({
+        user_id: userId,
+        balance_milli: balanceMilli,
+        settled_tick_id: tick,
+        last_settled_tick: tick,
+        created_at: tick,
+      });
+      return userId;
+    });
+    const userId = run();
+    return this.stmt.userById.get(userId) ?? null;
   }
 
   saveLedger(l) {
@@ -781,8 +978,14 @@ export async function openSqliteStore(path = 'fxsim.db') {
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000');
   const store = new SqliteStore(db);
   return store;
+}
+
+/** 用既有的 better-sqlite3 連線建立 store（與 better-auth 共用同一個連線 → 避免跨連線鎖） */
+export function createSqliteStore(db) {
+  return new SqliteStore(db);
 }
 
 /** 名目（A）→ milli */

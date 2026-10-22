@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FXSimulator M2 伺服器（HTTP + WebSocket，單一 process，含 tick 迴圈）。
+ * FXSimulator M3 伺服器（HTTP + WebSocket，單一 process，含 tick 迴圈）。
  *
  *   node src/server.js           （或 npm start）
  *
@@ -9,6 +9,8 @@
  *   PORT   預設 2641
  *   FXSIM_DB  預設 ./fxsim.db
  *   FXSIM_SEED 預設 42
+ *   NODE_ENV  正式環境必須為 production（否則 DEV_AUTH 會開啟 `?user=` 旁路）
+ *   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / BETTER_AUTH_SECRET  （Google 登入）
  *
  * nginx 會把 `/FXSimulator/` 前綴剝掉（`proxy_pass http://127.0.0.1:2641/`），
  * 所以本服務自帶路徑：`/`（靜態頁）、`/api/*`、`/ws`。
@@ -26,6 +28,8 @@ import { Engine } from './engine.js';
 import { createMemoryStore, openSqliteStore } from './db.js';
 import { LiveHub } from './live.js';
 import { registerApi, registerWs } from './api.js';
+import { initAuth, registerAuthRoutes, isProduction } from './auth.js';
+import { devAuthEnabled } from './identity.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
@@ -56,6 +60,8 @@ export async function openStore(dbPath) {
  * @param {number} opts.userId
  * @param {number} opts.tickMs      tick 間隔（毫秒）
  * @param {boolean} opts.live       是否啟動 tick 迴圈（測試用 false）
+ * @param {boolean} opts.auth       是否啟用 Google 登入（預設 true；無 SQLite 時自動停用）
+ * @param {boolean} opts.migrateAuth 啟動時自動跑 better-auth schema migration（預設 true）
  */
 export async function buildServer({
   dbPath = null,
@@ -63,18 +69,49 @@ export async function buildServer({
   userId = DEFAULT_USER_ID,
   tickMs = 1000,
   live = false,
+  auth: authEnabled = true,
+  migrateAuth = process.env.FXSIM_AUTO_MIGRATE !== '0',
 } = {}) {
   const store = await openStore(dbPath);
   const engine = new Engine({ seed, store, userId });
   engine.load();
   engine.init();
 
+  // ---- M3：better-auth（與 store 共用同一個 SQLite 連線 → 不會跨連線鎖） ----
+  let auth = null;
+  if (authEnabled && store.kind === 'sqlite' && store.db) {
+    if (migrateAuth) {
+      // 先用未解析的 options 跑 migration（避免 better-auth 在 init 時先噴 schema mismatch）
+      try {
+        const { getMigrations } = await import('better-auth/db/migration');
+        const { authOptions } = await import('./auth.js');
+        const { runMigrations } = await getMigrations(authOptions(store.db));
+        await runMigrations();
+      } catch (err) {
+        console.error(`[fxsim] better-auth migration 失敗：${err.message}`);
+      }
+    }
+    try {
+      auth = initAuth(store.db);
+    } catch (err) {
+      throw new Error(
+        `better-auth 初始化失敗：${err.message}（正式環境必須設定 BETTER_AUTH_SECRET / GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET）`,
+      );
+    }
+  } else if (authEnabled) {
+    console.warn('[fxsim] 無 SQLite → Google 登入停用（僅能 DEV_AUTH）');
+  }
+
   const hub = new LiveHub({ engine, tickMs });
 
   const app = Fastify({ logger: false });
   await app.register(websocket);
-  registerApi(app, { engine, hub, startedAt: Date.now() });
-  registerWs(app, { engine, hub, startedAt: Date.now() });
+
+  const apiCtx = { engine, hub, startedAt: Date.now(), store, auth };
+  registerApi(app, apiCtx);
+  registerWs(app, apiCtx);
+  // /api/auth/* 必須在靜態檔案之前註冊（避免被 wildcard 吃掉）
+  registerAuthRoutes(app, auth);
   await app.register(fastifyStatic, {
     root: PUBLIC_DIR,
     prefix: '/',
@@ -84,7 +121,7 @@ export async function buildServer({
 
   if (live) hub.start();
 
-  return { app, engine, store, hub };
+  return { app, engine, store, hub, auth };
 }
 
 /** 關閉：停迴圈 → 存檔 → 關 HTTP → 關 DB */
@@ -135,6 +172,13 @@ async function main() {
     await app.listen({ host, port });
     console.log(`[fxsim] 監聽 http://${host}:${port}（靜態頁 /、API /api/*、WS /ws）`);
     console.log(`[fxsim] DB ${dbPath}｜seed ${seed}｜tick 每 ${1000}ms`);
+    if (!isProduction()) {
+      console.warn(
+        '[fxsim] ⚠ NODE_ENV 未設為 production → DEV_AUTH 旁路可用（?user= 可指定任意使用者）',
+      );
+    } else if (devAuthEnabled()) {
+      console.warn('[fxsim] ⚠ production 下 DEV_AUTH 仍啟用：請檢查環境變數');
+    }
   } catch (err) {
     console.error(`[fxsim] 啟動失敗：${err.message}`);
     await shutdown(ctx);

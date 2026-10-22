@@ -6,5 +6,8 @@ data/
 fxsim.db
 fxsim.db-wal
 fxsim.db-shm
+.env
+.env.*
+!.env.example
 .DS_Store
 npm-debug.log*

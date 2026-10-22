@@ -3,6 +3,10 @@
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
+// 部署在 nginx 子路徑 /FXSimulator/ 時，API/WS 必須帶前綴；本機根路徑則為空。
+export const BASE = /^\/FXSimulator(?:\/|$)/.test(location.pathname) ? '/FXSimulator' : '';
+export const api = (path) => `${BASE}${path}`;
+
 export function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;

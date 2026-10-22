@@ -4,6 +4,8 @@
 export const state = {
   isMock: false,
   userId: '1',
+  user: null,          // M3：登入使用者（/api/me 或 mock 預載；contract user 形狀）
+  devAuth: false,      // M3：/api/me 的 dev_auth → true 時 ?user= 才生效
   config: null,          // GET /api/config（mock 用相同形狀的常數）
 
   serverNow: Date.now(), // 每個訊息對齊 server_time
