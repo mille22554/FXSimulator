@@ -1,4 +1,4 @@
-/* news.js — 桌面右側可收合新聞看板：HH:MM＋標題＋已實現跳空（方向色）；
+/* news.js — 桌面右側可收合新聞看板：HH:MM＋標題；
    篩選 全部／大幅(≥2%)；|jump| ≥1.5% 跳橫幅（4s 滑入）；點擊定位圖表時間。 */
 
 import { state, eventTimeMs } from './state.js';
@@ -61,21 +61,19 @@ export function renderNews() {
 
   listUI.textContent = '';
   if (!shown.length) {
-    listUI.appendChild(el('li', 'news-list-empty', filter === 'big' ? '最近無跳空 ≥2% 的事件。' : '尚無事件。'));
+    listUI.appendChild(el('li', 'news-list-empty', filter === 'big' ? '最近無大幅事件。' : '尚無事件。'));
     return;
   }
   for (const ev of shown.slice(0, 100)) {
     const li = el('button', 'news-item');
     li.type = 'button';
     li.dataset.tick = String(ev.tick_id);
-    li.setAttribute('aria-label', `${fmtHHMM(eventTimeMs(ev))} ${ev.headline} 跳空 ${pctSigned(ev.impact_jump)}，點擊定位圖表`);
+    li.setAttribute('aria-label', `${fmtHHMM(eventTimeMs(ev))} ${ev.headline}，點擊定位圖表`);
     if (state.ui.focusEventTickId === ev.tick_id) li.classList.add('focused');
     li.append(
       el('span', 'n-time', fmtHHMM(eventTimeMs(ev))),
       el('span', 'n-head', ev.headline),
     );
-    const j = ev.impact_jump;
-    li.appendChild(el('span', `n-jump mono ${j > 0 ? 'up' : j < 0 ? 'down' : 'dim'}`, pctSigned(j)));
     listUI.appendChild(li);
   }
 }
