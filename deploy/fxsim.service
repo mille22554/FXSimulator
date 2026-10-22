@@ -1,0 +1,21 @@
+[Unit]
+Description=FXSimulator (Node.js)
+After=network.target
+
+[Service]
+Type=simple
+User=morowin
+Group=morowin
+WorkingDirectory=/opt/fxsimulator
+EnvironmentFile=/opt/fxsimulator/.env
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=2641
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

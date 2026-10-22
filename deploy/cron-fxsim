@@ -1,0 +1,14 @@
+# FXSimulator 維運排程（安裝到 /etc/cron.d/fxsim）
+#
+#   備份：每天 03:20 UTC 熱備份 fxsim.db → /var/backups/fxsim（保留 14 份）
+#   健檢：每 5 分鐘檢查 /healthz，失敗自動重啟 fxsim／cloudflared
+#
+# 安裝：
+#   sudo install -m 644 deploy/cron-fxsim /etc/cron.d/fxsim
+#   sudo install -m 755 deploy/healthcheck.sh /usr/local/sbin/fxsim-healthcheck.sh
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+20 3 * * * root cd /opt/fxsimulator && /usr/bin/node scripts/backup-db.mjs >> /var/log/fxsim-backup.log 2>&1
+*/5 * * * * root /usr/local/sbin/fxsim-healthcheck.sh

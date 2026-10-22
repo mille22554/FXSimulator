@@ -1,0 +1,9 @@
+# FXSimulator 維運 log（安裝到 /etc/logrotate.d/fxsim）
+/var/log/fxsim-health.log /var/log/fxsim-backup.log {
+    monthly
+    rotate 3
+    compress
+    missingok
+    notifempty
+    create 0640 root adm
+}
