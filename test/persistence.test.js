@@ -154,6 +154,7 @@ test('9. 60 個 tick → 恰好一根 1 分 K 線，OHLC 正確', () => {
   assert.equal(candles.length, 1, '60 個 tick 應只有一根 K 線');
   const c = candles[0];
   assert.equal(c.minute_id, 0);
+  assert.ok(c.started_at && !Number.isNaN(Date.parse(c.started_at)), 'K 線應有 ISO started_at');
 
   const e4s = prices.map(priceToE4);
   assert.equal(c.open_e4, e4s[0], 'open 應為分鐘第一個價格');

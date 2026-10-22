@@ -565,6 +565,7 @@ export class Engine {
   #newCandle(minuteId) {
     const candle = {
       minute_id: minuteId,
+      started_at: new Date().toISOString(),
       open_e4: null,
       high_e4: null,
       low_e4: null,

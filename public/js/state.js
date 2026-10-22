@@ -102,7 +102,13 @@ export function setCandles(list) {
     if (m != null && m >= nowMin) { forming = c; continue; }
     closed.push(c);
   }
-  state.candles = closed.slice(-600);
+  // 重連 snapshot 可能只帶最近 60 根 → 與既有歷史合併，避免 K 線歷史被截短
+  const byId = new Map(state.candles.map(c => [c.minute_id, c]));
+  for (const c of closed) byId.set(c.minute_id, c);
+  state.candles = [...byId.values()]
+    .filter(c => c.minute_id != null)
+    .sort((a, b) => a.minute_id - b.minute_id)
+    .slice(-600);
   state.forming = forming || null;
 }
 
@@ -160,7 +166,9 @@ export function chartData() {
   const mode = state.ui.chartMode;
   const candles = state.candles;
   if (mode === 'line') {
-    const pts = candles.map((c, i) => ({ t: candleTimeMS(c, i), v: c.close_e4 }));
+    const pts = candles
+      .filter(c => c.close_e4 != null)
+      .map(c => ({ t: candleTimeMS(c), v: c.close_e4 }));
     if (state.market.price_e4 != null) {
       pts.push({ t: state.serverNow, v: state.market.price_e4, live: true });
     }
@@ -172,7 +180,8 @@ export function chartData() {
   if (mode === 'm5') {
     const groups = new Map();
     for (const c of src) {
-      const key = Math.floor((Date.parse(c.started_at) || 0) / (5 * 60000));
+      const t = candleTimeMS(c);
+      const key = Math.floor(t / (5 * 60000));
       const g = groups.get(key);
       if (!g) groups.set(key, { t: key * 5 * 60000, open_e4: c.open_e4, high_e4: c.high_e4, low_e4: c.low_e4, close_e4: c.close_e4 });
       else {
@@ -183,13 +192,20 @@ export function chartData() {
     }
     return { candles5: [...groups.values()] };
   }
-  return { candles1: src.slice(-300) };
+  return { candles1: src.slice(-300).map(c => ({ ...c, t: candleTimeMS(c) })) };
 }
 
-export function candleTimeMS(c, i) {
-  if (c.started_at) return Date.parse(c.started_at);
-  // 退化：以現在對齊回推（每根 60 分 K 中第 i 根）
-  return state.serverNow - (59 - i) * 60000;
+export function candleTimeMS(c, i = 0) {
+  if (c.started_at) {
+    const t = Date.parse(c.started_at);
+    if (Number.isFinite(t)) return t;
+  }
+  // M1 舊資料沒有 started_at → 用 minute_id 對齊目前 tick／serverNow，避免所有 K 擠在同一點
+  const tickId = Number.isFinite(state.tickId) ? state.tickId : 0;
+  const currentMinuteId = Math.floor(tickId / 60);
+  const currentMinuteStart = state.serverNow - (tickId % 60) * 1000;
+  const mid = c.minute_id ?? (currentMinuteId - (state.candles.length - 1 - i));
+  return currentMinuteStart - (currentMinuteId - mid) * 60000;
 }
 
 export function netNotionalSeries() {
