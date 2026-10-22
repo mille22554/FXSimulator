@@ -83,6 +83,8 @@ export function applyTick(data) {
   if (data.account) Object.assign(state.account, data.account);
   if (data.positions) state.positions = data.positions.filter(p => p.status === 'open');
 
+  // 先封舊分鐘，再把這一 tick 計入新 forming，避免分鐘邊界那一秒被算進舊 K
+  maybeCloseMinute();
   advanceForming();
 }
 
@@ -94,9 +96,16 @@ export function applyEventMessage(ev) {
 export function setCandles(list) {
   // 只留已過去分鐘的完整 K；最新一根若對上現在分鐘，視為 forming
   const nowMin = Math.floor(state.serverNow / 60000);
+  const currentMinuteId = Math.floor((Number.isFinite(state.tickId) ? state.tickId : 0) / 60);
   const closed = [];
   let forming = null;
   for (const c of list) {
+    if (c.minute_id != null) {
+      if (c.minute_id >= currentMinuteId) { forming = c; continue; }
+      closed.push(c);
+      continue;
+    }
+    // 舊資料沒有 minute_id → 退回以 started_at 判斷
     const t = c.started_at ? Date.parse(c.started_at) : null;
     const m = t ? Math.floor(t / 60000) : null;
     if (m != null && m >= nowMin) { forming = c; continue; }
@@ -113,22 +122,31 @@ export function setCandles(list) {
 }
 
 export function pushClosedCandle(c) {
-  state.candles.push(c);
+  if (c.minute_id == null) return;
+  const i = state.candles.findIndex(x => x.minute_id === c.minute_id);
+  if (i >= 0) state.candles[i] = c;
+  else state.candles.push(c);
+  state.candles.sort((a, b) => a.minute_id - b.minute_id);
   if (state.candles.length > 600) state.candles.shift();
   state.forming = null;
 }
 
 /** 每秒 tick：維護 forming K（未收盤僅更新 close/high/low，不長新 K） */
 export function advanceForming() {
-  const nowMin = Math.floor(state.serverNow / 60000);
+  const tickId = Number.isFinite(state.tickId) ? state.tickId : 0;
+  const currentMinuteId = Math.floor(tickId / 60);
+  const currentMinuteStart = state.serverNow - (tickId % 60) * 1000;
 
   if (!state.forming) {
     const last = state.candles[state.candles.length - 1];
     const p = state.market.price_e4;
     if (p == null) return;
+    const mid = last && Number.isFinite(last.minute_id) ? last.minute_id + 1 : currentMinuteId;
+    let started = currentMinuteStart - (currentMinuteId - mid) * 60000;
+    if (started > state.serverNow) started = state.serverNow;
     state.forming = {
-      minute_id: (last ? last.minute_id + 1 : null),
-      started_at: new Date(nowMin * 60000).toISOString(),
+      minute_id: mid,
+      started_at: new Date(started).toISOString(),
       open_e4: last ? (last.close_e4 ?? last.open_e4) : p,
       high_e4: p, low_e4: p, close_e4: p,
       base_close_e4: last ? last.base_close_e4 : p,
@@ -145,11 +163,14 @@ export function advanceForming() {
   state.forming.net_notional_milli = state.market.net_notional_milli ?? state.forming.net_notional_milli;
 }
 
-/** 分鐘邊界：將 forming 封存為已收 K（60 tick 一根；這裡以分鐘換軸判定） */
+/** 分鐘邊界：將 forming 封存為已收 K（以伺服器 tickId 的分鐘歸屬判定） */
 export function maybeCloseMinute() {
-  const nowMin = Math.floor(state.serverNow / 60000);
-  const fs = state.forming ? Date.parse(state.forming.started_at) : 0;
-  if (state.forming && Math.floor(fs / 60000) < nowMin) {
+  if (!state.forming) return;
+  const currentMinuteId = Math.floor((Number.isFinite(state.tickId) ? state.tickId : 0) / 60);
+  const mid = state.forming.minute_id;
+  const legacyCloses = mid == null
+    && Math.floor((Date.parse(state.forming.started_at) || 0) / 60000) < Math.floor(state.serverNow / 60000);
+  if ((mid != null && mid < currentMinuteId) || legacyCloses) {
     pushClosedCandle(state.forming);
     state.forming = null;
     advanceForming();
