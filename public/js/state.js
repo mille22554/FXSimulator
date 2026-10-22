@@ -119,6 +119,10 @@ export function setCandles(list) {
     .sort((a, b) => a.minute_id - b.minute_id)
     .slice(-600);
   state.forming = forming || null;
+  // 同一分鐘只能有一根：forming 若與已收 K 同 id，以 forming 為準
+  if (state.forming && state.forming.minute_id != null) {
+    state.candles = state.candles.filter(c => c.minute_id !== state.forming.minute_id);
+  }
 }
 
 export function pushClosedCandle(c) {
@@ -199,7 +203,8 @@ export function chartData() {
     return { points: [...byT.values()].sort((a, b) => a.t - b.t) };
   }
   // K 線：1 或 5 分聚合
-  const src = [...candles];
+  const formingId = state.forming?.minute_id;
+  const src = formingId == null ? [...candles] : candles.filter(c => c.minute_id !== formingId);
   if (state.forming) src.push(state.forming);
   if (mode === 'm5') {
     const groups = new Map();

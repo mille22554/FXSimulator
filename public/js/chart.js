@@ -1,8 +1,8 @@
 /* chart.js — Canvas 2D 走勢圖（主圖）＋全服淨部位副圖。
    redraw 條件：tick 常壓送、指標移動、resize；形成 K 只在 tick 級別更新。 */
 
-import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=7';
-import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=7';
+import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=8';
+import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=8';
 
 const COLORS = {
   grid: '#161c28',
@@ -273,16 +273,19 @@ export class Chart {
       const { t } = getTimeCandle(c);
       const x = V.timeToX(t + step / 2); // K 中央
       if (x < V.plot.x - 20 || x > V.plot.x + V.plot.w + 20) continue;
-      const up = c.close_e4 >= c.open_e4;
+      const o = Number(c.open_e4), h = Number(c.high_e4), l = Number(c.low_e4), cl = Number(c.close_e4);
+      if (![o, h, l, cl].every(Number.isFinite)) continue;
+      const hi = Math.max(h, o, cl), lo = Math.min(l, o, cl);
+      const up = cl >= o;
       const color = up ? COLORS.up : COLORS.down;
       ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1;
-      // 影線
-      const xh = Math.round(x) + .5;
+      // 影線（一律包住實體，避免細線與粗線看起來分開）
+      const xh = x;
       ctx.beginPath();
-      ctx.moveTo(xh, V.priceToY(c.high_e4)); ctx.lineTo(xh, V.priceToY(c.low_e4));
+      ctx.moveTo(xh, V.priceToY(hi)); ctx.lineTo(xh, V.priceToY(lo));
       ctx.stroke();
       // 實體
-      const yO = V.priceToY(c.open_e4), yC = V.priceToY(c.close_e4);
+      const yO = V.priceToY(o), yC = V.priceToY(cl);
       const top = Math.min(yO, yC), bh = Math.max(1, Math.abs(yO - yC));
       ctx.fillRect(x - bodyW / 2, top, bodyW, bh);
     }
