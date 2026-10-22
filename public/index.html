@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FXSimulator — 交易</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0d13'/%3E%3Cpath d='M6 20 L12 13 L16 17 L26 6' stroke='%2326d07c' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css?v=4">
 </head>
 <body>
 <div id="app">
@@ -134,10 +134,6 @@
       <div id="newsBody" class="news-body">
         <div class="news-head">
           <h2 class="pane-title">新聞</h2>
-          <div class="news-filters" role="group" aria-label="新聞篩選">
-            <button class="nf active" data-filter="all">全部</button>
-            <button class="nf" data-filter="big">大幅</button>
-          </div>
         </div>
         <ul id="newsList" class="news-list" aria-live="polite"></ul>
         <p class="news-note dim">本看板只顯示市場事件；玩家交易造成的價格變動不列入。</p>
@@ -162,7 +158,6 @@
   <div id="evBanner" class="ev-banner" hidden aria-live="polite">
     <span class="ev-dir" id="evBannerDir"></span>
     <b id="evBannerHead"></b>
-    <span class="mono" id="evBannerJump"></span>
   </div>
 
   <!-- ═══ 登入遮罩（M3：未確認登入時擋住交易介面，交易 WS 不初始化） ═══ -->
@@ -264,6 +259,6 @@
   <div id="toasts" aria-live="polite"></div>
 </div>
 
-<script type="module" src="js/app.js?v=3"></script>
+<script type="module" src="js/app.js?v=4"></script>
 </body>
 </html>

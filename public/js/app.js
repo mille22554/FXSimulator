@@ -8,7 +8,7 @@ import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.
 import { Chart } from './chart.js';
 import { initOrderPanel, refreshOnTick } from './order.js';
 import { initPositions, renderPositions } from './positions.js';
-import { initNews, renderNews, maybeBanner } from './news.js?v=3';
+import { initNews, renderNews, maybeBanner } from './news.js?v=4';
 import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js';
 import { initReport, initReportApi, fetchAndShowReport } from './report.js';
 import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js';

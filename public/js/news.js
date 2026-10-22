@@ -1,8 +1,8 @@
-/* news.js — 桌面右側可收合新聞看板：HH:MM＋標題；
-   篩選 全部／大幅(≥2%)；|jump| ≥1.5% 跳橫幅（4s 滑入）；點擊定位圖表時間。 */
+/* news.js — 桌面右側可收合新聞看板：HH:MM＋標題，依時間列出全部事件；
+   重大事件（|jump| ≥1.5%）跳中性事件橫幅（4s 滑入）；點擊定位圖表時間。 */
 
 import { state, eventTimeMs } from './state.js';
-import { $, $$, el, fmtHHMM, pctSigned } from './util.js';
+import { $, el, fmtHHMM } from './util.js';
 
 let bannerTimer = null;
 let lastEventId = null;
@@ -18,12 +18,6 @@ export function initNews(onFocusEvent) {
     state.ui.newsOpen = !state.ui.newsOpen;
     applyCollapse();
   });
-
-  $$('.nf').forEach(btn => btn.addEventListener('click', () => {
-    state.ui.newsFilter = btn.dataset.filter;
-    $$('.nf').forEach(b => b.classList.toggle('active', b === btn));
-    renderNews();
-  }));
 
   $('#newsList').addEventListener('click', e => {
     const item = e.target.closest('.news-item');
@@ -53,18 +47,16 @@ function mainGridResize() { /* ResizeObserver 監看 chart pane，無需額外�
 export function renderNews() {
   const listUI = $('#newsList');
   const events = state.events;
-  const filter = state.ui.newsFilter;
-  const shown = filter === 'big' ? events.filter(e => Math.abs(e.impact_jump) >= 0.02) : events;
 
   $('#newsCount').textContent = events.length ? `${events.length}` : '';
   $('#newsBadge').textContent = events.length ? String(events.length) : '';
 
   listUI.textContent = '';
-  if (!shown.length) {
-    listUI.appendChild(el('li', 'news-list-empty', filter === 'big' ? '最近無大幅事件。' : '尚無事件。'));
+  if (!events.length) {
+    listUI.appendChild(el('li', 'news-list-empty', '尚無事件。'));
     return;
   }
-  for (const ev of shown.slice(0, 100)) {
+  for (const ev of events.slice(0, 100)) {
     const li = el('button', 'news-item');
     li.type = 'button';
     li.dataset.tick = String(ev.tick_id);
@@ -78,18 +70,16 @@ export function renderNews() {
   }
 }
 
-/* ── 橫幅：僅 |jump| ≥ 1.5% ── */
+/* ── 橫幅：重大事件（|jump| ≥ 1.5%）的中性提示，不顯示幅度／方向 ── */
 export function maybeBanner(ev) {
   if (lastEventId === ev.id) return;
   lastEventId = ev.id;
   if (Math.abs(ev.impact_jump) < 0.015) return;
 
   const banner = $('#evBanner');
-  const up = ev.impact_jump >= 0;
-  banner.className = `ev-banner ${up ? 'up' : 'down'}`;
-  $('#evBannerDir').textContent = up ? '▲ 大幅跳空' : '▼ 大幅跳空';
+  banner.className = 'ev-banner';
+  $('#evBannerDir').textContent = '市場事件';
   $('#evBannerHead').textContent = ev.headline;
-  $('#evBannerJump').textContent = pctSigned(ev.impact_jump);
   banner.hidden = false;
   banner.classList.remove('show');
   void banner.offsetWidth; // 重新觸發動畫

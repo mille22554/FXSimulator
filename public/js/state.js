@@ -38,7 +38,6 @@ export const state = {
   // UI（非 contract 資料）
   ui: {
     chartMode: 'line',     // line | m1 | m5
-    newsFilter: 'all',     // all | big
     newsOpen: true,
     focusEventTickId: null,
     crosshair: null,
@@ -90,9 +89,6 @@ export function applyTick(data) {
 export function applyEventMessage(ev) {
   if (state.events.some(e => e.id === ev.id)) return;
   state.events = [ev, ...state.events].slice(0, 100);
-  if (state.ui.newsOpen && state.ui.newsFilter === 'big' && Math.abs(ev.impact_jump) < 0.02) {
-    /* 大幅篩選開著時靜默新增（規格：其餘靜默新增） */
-  }
 }
 
 export function setCandles(list) {
