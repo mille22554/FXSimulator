@@ -440,7 +440,7 @@ test('R6b. 報告會記錄 SL 平倉', () => {
   assert.equal(sl.rule_id, engine.rules.listFor(1)[0].id);
 });
 
-test('R6c. WS 連線會產生離線報告（last_seen_tick 隨連線更新）', async () => {
+test('R6c. 第一次 WS 連線不產生離線報告；之後離線重連才有', async () => {
   await withServer(async ({ app, engine }) => {
     freezePrice(engine, 5.0);
     makeRule(engine, 1, { side: 'long', trigger_price_e4: 50100, margin_a: 1000, leverage: 10 });
@@ -448,28 +448,43 @@ test('R6c. WS 連線會產生離線報告（last_seen_tick 隨連線更新）', 
     await app.listen({ host: '127.0.0.1', port: 0 });
     const port = app.server.address().port;
 
-    // 離線 50 個 tick
+    // 新帳號：last_seen_tick 尚未建立
     engine.tick(50);
     const acct = engine.ensureAccount(1);
     assert.equal(acct.lastSeenTick, 0);
 
-    const { ws, queue } = await connectWs(port, 1);
+    const first = await connectWs(port, 1);
+    let second;
     try {
-      await queue.next(); // snapshot
-      assert.equal(acct.lastSeenTick, 49, 'WS 連線時 last_seen_tick 應更新到目前');
+      await first.queue.next(); // snapshot
+      assert.equal(acct.lastSeenTick, 49, '第一次連線只建立 last_seen_tick，不產生報告');
+
+      const firstReport = json(await app.inject({ method: 'GET', url: '/api/report?user=1' }));
+      assert.equal(firstReport.since_tick, 49);
+      assert.equal(firstReport.until_tick, 49);
+      assert.equal(firstReport.offline_seconds, 0);
+      assert.equal(firstReport.income_milli, 0);
+
+      // 離線 10 秒後重連 → 這次才應有離線報告
+      engine.reports.onUserOffline(1);
+      engine.tick(10);
+      second = await connectWs(port, 1);
+      await second.queue.next();
+      assert.equal(acct.lastSeenTick, 59);
 
       const report = json(await app.inject({ method: 'GET', url: '/api/report?user=1' }));
-      assert.equal(report.since_tick, 0);
-      assert.equal(report.until_tick, 49);
-      assert.equal(report.offline_seconds, 49);
-      assert.equal(report.income_milli, INCOME_MILLI_PER_TICK * 49);
-      assert.ok(report.equity_end_milli > 0);
+      assert.equal(report.since_tick, 49);
+      assert.equal(report.until_tick, 59);
+      assert.equal(report.offline_seconds, 10);
+      assert.equal(report.income_milli, INCOME_MILLI_PER_TICK * 10);
+      assert.ok(report.equity_end_milli > report.equity_start_milli, '離線期間有收入');
       assert.ok(report.equity_high_milli >= report.equity_end_milli);
       assert.ok(report.equity_low_milli <= report.equity_end_milli);
       assert.equal(report.liquidated, false);
       assert.ok(Array.isArray(report.triggers));
     } finally {
-      ws.close();
+      first.ws.close();
+      second?.ws.close();
     }
   });
 });

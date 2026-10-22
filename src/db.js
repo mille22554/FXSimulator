@@ -388,6 +388,7 @@ export function createMemoryStore() {
         settled_tick_id: tick,
         last_settled_tick: tick,
         created_at: tick,
+        last_seen_tick: tick,
       });
       return user;
     },
@@ -536,8 +537,8 @@ class SqliteStore {
          VALUES (@google_sub, @email, @email_verified, @display_name, @avatar_url, @disabled, @role, @created_at, @ba_user_id)`,
       ),
       insertLocalAccount: db.prepare(
-        `INSERT INTO accounts (user_id, balance_milli, settled_tick_id, last_settled_tick, created_at)
-         VALUES (@user_id, @balance_milli, @settled_tick_id, @last_settled_tick, @created_at)`,
+        `INSERT INTO accounts (user_id, balance_milli, settled_tick_id, last_settled_tick, created_at, last_seen_tick)
+         VALUES (@user_id, @balance_milli, @settled_tick_id, @last_settled_tick, @created_at, @last_seen_tick)`,
       ),
       ledger: db.prepare(`SELECT * FROM ledger ORDER BY id DESC LIMIT ?`),
       tradesRange: db.prepare(
@@ -814,6 +815,7 @@ class SqliteStore {
         settled_tick_id: tick,
         last_settled_tick: tick,
         created_at: tick,
+        last_seen_tick: tick,
       });
       return userId;
     });

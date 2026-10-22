@@ -38,6 +38,14 @@ export class ReportService {
     const until = this.currentTickId();
     const since = acct.lastSeenTick ?? 0;
 
+    // 第一次上線（last_seen_tick 尚未建立）→ 沒有「離線期間」可言，
+    // 直接從現在開始追蹤，避免新帳號一登入就跳出離線報告。
+    if (since <= 0) {
+      this.pending.delete(userId);
+      this.#markSeen(acct, until);
+      return null;
+    }
+
     // 先算離線報告（用「上線前」的 equity_seen 與期間高低點）
     const report = this.#build(userId, { since, until });
     this.pending.set(userId, report);

@@ -40,6 +40,7 @@ export async function fetchAndShowReport() {
   try {
     const j = await restApi(`/api/report${state.userId == null ? '' : `?user=${encodeURIComponent(state.userId)}`}`);
     if (!j || j.until_tick == null || j.since_tick == null) return;
+    if (j.since_tick <= 0) return; // 新帳號第一次上線：不顯示離線報告
     // 無離線期間 → 不彈；明顯短暫的重連（<60s 且無事件）→ 不打擾
     const hasEvents = (j.triggers || []).length > 0 || !!j.liquidated;
     if (j.until_tick - j.since_tick < 1) return;
