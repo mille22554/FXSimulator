@@ -40,7 +40,6 @@ export const state = {
     chartMode: 'line',     // line | m1 | m5
     chartRange: 60,        // 顯示區間（分鐘）：60 / 240 / 600
     newsOpen: true,
-    focusEventTickId: null,
     crosshair: null,
   },
   pendingOrders: new Map(), // request_id → { side, ... }（凍結列入 pending）

@@ -1,14 +1,14 @@
 /* news.js — 桌面右側可收合新聞看板：HH:MM＋標題，依時間列出全部事件；
-   重大事件（|jump| ≥1.5%）跳中性事件橫幅（4s 滑入）；點擊定位圖表時間。 */
+   重大事件（|jump| ≥1.5%）跳中性事件橫幅（4s 滑入）。 */
 
-import { state, eventTimeMs } from './state.js?v=6';
-import { $, el, fmtHHMM } from './util.js?v=6';
+import { state, eventTimeMs } from './state.js?v=7';
+import { $, el, fmtHHMM } from './util.js?v=7';
 
 let bannerTimer = null;
 let lastEventId = null;
 let onFirstNewEvent = null;
 
-export function initNews(onFocusEvent) {
+export function initNews() {
   onFirstNewEvent = () => {
     const latest = state.events[0];
     if (latest) maybeBanner(latest);
@@ -17,14 +17,6 @@ export function initNews(onFocusEvent) {
   $('#newsToggle').addEventListener('click', () => {
     state.ui.newsOpen = !state.ui.newsOpen;
     applyCollapse();
-  });
-
-  $('#newsList').addEventListener('click', e => {
-    const item = e.target.closest('.news-item');
-    if (!item) return;
-    state.ui.focusEventTickId = Number(item.dataset.tick);
-    renderNews();
-    onFocusEvent(state.events.find(v => v.tick_id === state.ui.focusEventTickId));
   });
 
   applyCollapse();
@@ -57,11 +49,8 @@ export function renderNews() {
     return;
   }
   for (const ev of events.slice(0, 100)) {
-    const li = el('button', 'news-item');
-    li.type = 'button';
-    li.dataset.tick = String(ev.tick_id);
-    li.setAttribute('aria-label', `${fmtHHMM(eventTimeMs(ev))} ${ev.headline}，點擊定位圖表`);
-    if (state.ui.focusEventTickId === ev.tick_id) li.classList.add('focused');
+    const li = el('li', 'news-item');
+    li.setAttribute('aria-label', `${fmtHHMM(eventTimeMs(ev))} ${ev.headline}`);
     li.append(
       el('span', 'n-time', fmtHHMM(eventTimeMs(ev))),
       el('span', 'n-head', ev.headline),

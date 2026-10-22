@@ -1,8 +1,8 @@
 /* chart.js — Canvas 2D 走勢圖（主圖）＋全服淨部位副圖。
    redraw 條件：tick 常壓送、指標移動、resize；形成 K 只在 tick 級別更新。 */
 
-import { state, chartData, netNotionalSeries, candleTimeMS, eventTimeMs } from './state.js?v=6';
-import { fmtPrice, pctSigned, fmtHHMM, fmtCompactA } from './util.js?v=6';
+import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=7';
+import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=7';
 
 const COLORS = {
   grid: '#161c28',
@@ -44,60 +44,13 @@ export class Chart {
     main.addEventListener('mousemove', e => {
       const r = main.getBoundingClientRect();
       state.ui.crosshair = { x: e.clientX - r.left, y: e.clientY - r.top };
-      this.updateTipHover(e);
+      this.tip.hidden = true;
       this.render();
     });
     main.addEventListener('mouseleave', () => {
       state.ui.crosshair = null;
       this.tip.hidden = true;
       this.render();
-    });
-  }
-
-  /* 滑鼠移動：事件虛線 hover 顯示 headline；否則十字線資訊 */
-  updateTipHover(e) {
-    const r = this.main.getBoundingClientRect();
-    const x = e.clientX - r.left;
-    const v = this.view;
-    if (!v) { this.tip.hidden = true; return; }
-
-    // 找最近的 event 線（距離 < 6px）
-    const t = v.xToTime(x);
-    const evNear = this.visibleEvents()
-      .map(ev => ({ ev, evX: v.timeToX(eventTimeMs(ev)) }))
-      .filter(o => Math.abs(o.evX - x) < 6)
-      .sort((a, b) => Math.abs(a.evX - x) - Math.abs(b.evX - x))[0];
-
-    if (evNear) {
-      const j = evNear.ev.impact_jump;
-      this.tip.hidden = false;
-      this.tip.innerHTML = '';
-      const b = document.createElement('b'); b.textContent = evNear.ev.headline; this.tip.appendChild(b);
-      const s = document.createElement('span');
-      s.className = `tip-jump mono ${j >= 0 ? 'up' : 'down'}`;
-      s.textContent = pctSigned(j);
-      this.tip.appendChild(s);
-      const tx = Math.min(x + 12, r.width - this.tip.offsetWidth - 8);
-      const ty = Math.min(e.clientY - r.top + 14, r.height - this.tip.offsetHeight - 8);
-      this.tip.style.left = `${Math.max(8, tx)}px`;
-      this.tip.style.top = `${Math.max(8, ty)}px`;
-      return;
-    }
-
-    // 一般十字線：模式對應價
-    const price = v.yToPrice(state.ui.crosshair.y);
-    this.tip.hidden = true;
-    if (state.ui.chartMode === 'line') this.lastCross = { t, price };
-    else {
-      this.lastCross = { t, price, ohlc: v.ohlcAt(t) };
-    }
-  }
-
-  visibleEvents() {
-    const v = this.view;
-    return state.events.filter(ev => {
-      const t = eventTimeMs(ev);
-      return t >= v.t0 && t <= v.t1;
     });
   }
 
@@ -129,18 +82,10 @@ export class Chart {
     const data = chartData();
     const padR = 62, padB = 18, padT = 6, padL = 4;
 
-    // ─ x 域（1H / 4H / 10H；新聞點擊可平移） ─
+    // ─ x 域（1H / 4H / 10H） ─
     const rangeMs = Math.max(1, state.ui.chartRange ?? 60) * 60000;
     let t1 = state.serverNow + 90 * 1000;
     let t0 = t1 - rangeMs;
-    const ft = state.ui.focusEventTickId;
-    if (ft != null) {
-      const fEv = state.events.find(e => e.tick_id === ft);
-      if (fEv) {
-        const ftm = eventTimeMs(fEv);
-        if (ftm < t0 || ftm > t1) { t1 = ftm + 10 * 60000; t0 = t1 - rangeMs; }
-      }
-    }
 
     // ─ y 域（只掃描可見區間，避免舊歷史壓扁當前視窗） ─
     let lo = Infinity, hi = -Infinity;
@@ -199,29 +144,6 @@ export class Chart {
       ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
       ctx.fillStyle = COLORS.axis;
       ctx.fillText(fmtHHMM(t), x, h - 5);
-    }
-
-    // ─ 事件垂直虛線 ─
-    const focusT = ft != null ? eventTimeMs(state.events.find(e => e.tick_id === ft) || { tick_id: ft }) : null;
-    for (const ev of this.visibleEvents()) {
-      const x = Math.round(V.timeToX(eventTimeMs(ev))) + .5;
-      if (x < plot.x || x > plot.x + plot.w) continue;
-      const isFocus = focusT === eventTimeMs(ev);
-      ctx.save();
-      if (isFocus) {
-        ctx.strokeStyle = COLORS.event; ctx.globalAlpha = 1; ctx.lineWidth = 1.4;
-        ctx.setLineDash([]);
-      } else {
-        ctx.strokeStyle = COLORS.event; ctx.globalAlpha = .75; ctx.lineWidth = 1;
-        ctx.setLineDash([3, 4]);
-      }
-      ctx.beginPath(); ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.h); ctx.stroke();
-      ctx.restore();
-      // 事件點（小菱形）
-      ctx.fillStyle = COLORS.event;
-      ctx.beginPath();
-      ctx.moveTo(x, plot.y + 3); ctx.lineTo(x + 3, plot.y + 7); ctx.lineTo(x, plot.y + 11); ctx.lineTo(x - 3, plot.y + 7);
-      ctx.closePath(); ctx.fill();
     }
 
     // ─ 自己的進場 / 強平標線 ─

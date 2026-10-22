@@ -3,8 +3,8 @@
    rule.upsert / rule.delete（回覆 rule.updated / rule.rejected）。
    觸發價與現價距離 <0.05% → 警示「會立刻成交；後端會以 trigger_too_close 拒絕。 */
 
-import { state } from './state.js?v=6';
-import { $, $$, el, fmtA, fmtPrice, priceE4, api } from './util.js?v=6';
+import { state } from './state.js?v=7';
+import { $, $$, el, fmtA, fmtPrice, priceE4, api } from './util.js?v=7';
 
 const TRIGGER_TOO_CLOSE_PCT = 0.0005; // 0.05%
 
