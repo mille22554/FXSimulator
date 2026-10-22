@@ -991,3 +991,72 @@ body.gated #app > *:not(#loginGate) { visibility: hidden; }
   .signout-btn { min-height: 36px; }
 }
 
+/* ============================================================
+   新版本提示（#updateBanner）— 偵測到新版時持續顯示，直到玩家重整
+   桌機：固定在頁面最底（蓋住 footer 免責聲明，不碰圖表／下單面板）
+   手機：回歸一般文件流，排在持倉列之後、吸底下單面板之前
+   ============================================================ */
+.update-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 55; /* 低於 evBanner(60)／toast(70)／overlay(80) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 34px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border-top: 1px solid var(--accent);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, .45);
+}
+.update-banner[hidden] { display: none; }
+.update-banner .u-text { color: var(--dim); }
+.update-banner .u-text::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 8px;
+  vertical-align: middle;
+}
+#updateNow {
+  flex: none;
+  padding: 5px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(91, 141, 255, .12);
+  border: 1px solid rgba(91, 141, 255, .5);
+  border-radius: 5px;
+  transition: filter .12s;
+}
+#updateNow:hover { filter: brightness(1.2); }
+
+/* 手機（≤819.98px）：fixed 底部會蓋住 sticky 下單面板的買賣按鈕，
+   改回文件流內的橫條。order:2 與 #positionsBar 同序（DOM 在後 → 排其後），
+   #orderPane 的 order:3 在其後 → 順序變成 持倉 → 更新提示 → 下單面板 */
+@media (max-width: 819.98px) {
+  .update-banner {
+    position: static;
+    order: 2;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    font-size: 13px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-2);
+    box-shadow: none;
+  }
+  /* 窄螢幕：文字可縮可換行，避免把右侧按鈕擠出畫面（390px 實測會裁切） */
+  .update-banner .u-text { flex: 1 1 auto; min-width: 0; }
+  #updateNow { flex: none; min-height: 44px; padding: 8px 18px; font-size: 14px; }
+}
+

@@ -2,16 +2,17 @@
    snapshot 接管狀態 → tick 1Hz 重繪、下單送出（WS order.open／order.close）→
    toast／橫幅／連線狀態。未登入一律不初始化交易 WS。 */
 
-import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js?v=9';
-import { createTransport } from './ws.js?v=9';
-import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js?v=9';
-import { Chart } from './chart.js?v=9';
-import { initOrderPanel, refreshOnTick } from './order.js?v=9';
-import { initPositions, renderPositions } from './positions.js?v=9';
-import { initNews, renderNews, maybeBanner } from './news.js?v=9';
-import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js?v=9';
-import { initReport, initReportApi, fetchAndShowReport } from './report.js?v=9';
-import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js?v=9';
+import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js?v=10';
+import { createTransport } from './ws.js?v=10';
+import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js?v=10';
+import { Chart } from './chart.js?v=10';
+import { initOrderPanel, refreshOnTick } from './order.js?v=10';
+import { initPositions, renderPositions } from './positions.js?v=10';
+import { initNews, renderNews, maybeBanner } from './news.js?v=10';
+import { initRulesPanel, initRulesApi, setRulesWsSender, loadRules, renderRules, applyRuleUpdate, applyRuleRejected, ruleReasonText, rulesOnTick } from './rules.js?v=10';
+import { initReport, initReportApi, fetchAndShowReport } from './report.js?v=10';
+import { $, fmtA, fmtA1, fmtCompactA, fmtPrice, fmtClock, uuid, pctSigned, api } from './util.js?v=10';
+import { initUpdateWatch } from './update.js?v=10';
 
 const params = new URLSearchParams(location.search);
 state.isMock = params.get('mock') === '1';
@@ -308,6 +309,18 @@ function scheduleRender() {
   });
 }
 
+/* ── 前端版本更新提示（update.js 偵測到新版時呼叫） ── */
+function showUpdateBanner() {
+  const box = $('#updateBanner');
+  if (!box) return;
+  box.hidden = false;
+  const btn = $('#updateNow');
+  if (btn && !btn.dataset.boundReload) {
+    btn.dataset.boundReload = '1';
+    btn.addEventListener('click', () => location.reload());
+  }
+}
+
 /* ── 圖表模式 tabs ── */
 function initModeTabs() {
   document.querySelectorAll('.mode-tab').forEach(tab => {
@@ -395,6 +408,11 @@ async function boot() {
   // M3：條件單 + 離線報告
   initRulesPanel();
   initReport();
+
+  // 前端版本更新提示：偵測到已部署新版就請玩家重整（mock 模式無部署版本概念，略過）
+  if (!state.isMock) initUpdateWatch({ onOutdated: showUpdateBanner });
+  // 預覽／驗收用：?update=1 直接顯示提示（不影響正常偵測）
+  if (params.get('update') === '1') showUpdateBanner();
 
   setConn('connecting');
 

@@ -1,8 +1,8 @@
 /* chart.js — Canvas 2D 走勢圖（主圖）＋全服淨部位副圖。
    redraw 條件：tick 常壓送、指標移動、resize；形成 K 只在 tick 級別更新。 */
 
-import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=9';
-import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=9';
+import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=10';
+import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=10';
 
 const COLORS = {
   grid: '#161c28',
