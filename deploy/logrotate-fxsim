@@ -1,5 +1,8 @@
 # FXSimulator 維運 log（安裝到 /etc/logrotate.d/fxsim）
+# Ubuntu 的 /var/log 是 root:adm 且 group-writable，logrotate 會拒絕，
+# 必須明指定 su 使用者/群組。
 /var/log/fxsim-health.log /var/log/fxsim-backup.log {
+    su root adm
     monthly
     rotate 3
     compress
