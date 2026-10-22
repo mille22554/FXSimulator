@@ -138,6 +138,8 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   padding-bottom: 8px;
 }
 .chart-title { display: flex; align-items: baseline; gap: 10px; }
@@ -149,6 +151,11 @@ button {
 #chartRange { font-size: 11px; }
 
 .mode-tabs { display: flex; gap: 2px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+.chart-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.range-tabs { display: flex; gap: 2px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+.range-tab { padding: 3px 9px; font-size: 11px; color: var(--dim); border-radius: 4px; }
+.range-tab:hover { color: var(--text); }
+.range-tab.active { background: var(--panel-2); color: var(--text); }
 .mode-tab {
   padding: 3px 12px;
   font-size: 12px;
@@ -830,6 +837,7 @@ input[type="range"]::-moz-range-thumb {
   }
   #chartPrice { font-size: 17px; }
   .mode-tab { min-height: 40px; padding: 0 14px; }
+  .range-tab { min-height: 40px; padding: 0 10px; }
 
   /* ── 持倉：橫向卡片 ── */
   #positionsBar { flex: none; height: auto; min-height: 68px; padding: 8px 10px; gap: 8px; }

@@ -2,7 +2,7 @@
    snapshot 接管狀態 → tick 1Hz 重繪、下單送出（WS order.open／order.close）→
    toast／橫幅／連線狀態。未登入一律不初始化交易 WS。 */
 
-import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming } from './state.js';
+import { state, applySnapshot, applyTick, applyEventMessage, maybeCloseMinute, advanceForming, setCandles } from './state.js';
 import { createTransport } from './ws.js';
 import { initAuthApp, isDevAuth, fetchMe, showLogin, currentUser } from './auth.js';
 import { Chart } from './chart.js';
@@ -261,12 +261,10 @@ function advanceTickWallclock() { /* state.serverNow 已於 applyTick 更新 */ 
 /* 初載 REST 補強：candles 與 events 以 REST 為準（contract 允許空陣列） */
 async function loadRestBootstrap(snapData) {
   try {
-    if (!snapData.candles || snapData.candles.length < 60) {
-      const r = await fetch(api('/api/candles?limit=60'));
+    if (!snapData.candles || snapData.candles.length < 600) {
+      const r = await fetch(api('/api/candles?limit=600'));
       if (r.ok) {
-        const arr = await r.json();
-        state.candles = arr.slice(-600);
-        state.forming = null;
+        setCandles(await r.json());
         advanceForming();
       }
     }
@@ -325,6 +323,21 @@ function initModeTabs() {
   });
 }
 
+/* ── 時間區間 tabs（1H / 4H / 10H） ── */
+function initRangeTabs() {
+  document.querySelectorAll('.range-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      state.ui.chartRange = Number(tab.dataset.range) || 60;
+      document.querySelectorAll('.range-tab').forEach(t => {
+        const active = t === tab;
+        t.classList.toggle('active', active);
+        t.setAttribute('aria-pressed', String(active));
+      });
+      chart.render();
+    });
+  });
+}
+
 /* ── M3：/api/me 確認 dev_auth 後才允許 ?user=；其他一律純 session ── */
 function applyUserId() {
   state.devAuth = isDevAuth();
@@ -363,6 +376,7 @@ async function boot() {
   wsAuthHandled = false;
 
   initModeTabs();
+  initRangeTabs();
 
   // config：mock 用常數；真實取 /api/config
   if (state.isMock) {

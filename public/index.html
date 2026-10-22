@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FXSimulator — 交易</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0d13'/%3E%3Cpath d='M6 20 L12 13 L16 17 L26 6' stroke='%2326d07c' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
 <div id="app">
@@ -54,10 +54,17 @@
           <span class="mono chg" id="chartChange"></span>
           <span class="mono dim" id="chartRange"></span>
         </div>
-        <div class="mode-tabs" role="tablist" aria-label="圖表模式">
-          <button class="mode-tab active" data-mode="line"  role="tab" aria-selected="true">折線</button>
-          <button class="mode-tab" data-mode="m1" role="tab" aria-selected="false">1分K</button>
-          <button class="mode-tab" data-mode="m5" role="tab" aria-selected="false">5分K</button>
+        <div class="chart-controls">
+          <div class="range-tabs" role="group" aria-label="時間區間">
+            <button class="range-tab active" data-range="60" aria-pressed="true">1H</button>
+            <button class="range-tab" data-range="240" aria-pressed="false">4H</button>
+            <button class="range-tab" data-range="600" aria-pressed="false">10H</button>
+          </div>
+          <div class="mode-tabs" role="tablist" aria-label="圖表模式">
+            <button class="mode-tab active" data-mode="line"  role="tab" aria-selected="true">折線</button>
+            <button class="mode-tab" data-mode="m1" role="tab" aria-selected="false">1分K</button>
+            <button class="mode-tab" data-mode="m5" role="tab" aria-selected="false">5分K</button>
+          </div>
         </div>
       </div>
       <div class="chart-body">
@@ -259,6 +266,6 @@
   <div id="toasts" aria-live="polite"></div>
 </div>
 
-<script type="module" src="js/app.js?v=4"></script>
+<script type="module" src="js/app.js?v=5"></script>
 </body>
 </html>

@@ -129,31 +129,32 @@ export class Chart {
     const data = chartData();
     const padR = 62, padB = 18, padT = 6, padL = 4;
 
-    // ─ y 域 ─
+    // ─ x 域（1H / 4H / 10H；新聞點擊可平移） ─
+    const rangeMs = Math.max(1, state.ui.chartRange ?? 60) * 60000;
+    let t1 = state.serverNow + 90 * 1000;
+    let t0 = t1 - rangeMs;
+    const ft = state.ui.focusEventTickId;
+    if (ft != null) {
+      const fEv = state.events.find(e => e.tick_id === ft);
+      if (fEv) {
+        const ftm = eventTimeMs(fEv);
+        if (ftm < t0 || ftm > t1) { t1 = ftm + 10 * 60000; t0 = t1 - rangeMs; }
+      }
+    }
+
+    // ─ y 域（只掃描可見區間，避免舊歷史壓扁當前視窗） ─
     let lo = Infinity, hi = -Infinity;
     const scan = p => { if (p != null && !Number.isNaN(p)) { if (p < lo) lo = p; if (p > hi) hi = p; } };
-    if (data.points) data.points.forEach(p => scan(p.v));
-    if (data.candles1) data.candles1.forEach(c => { scan(c.high_e4); scan(c.low_e4); });
-    if (data.candles5) data.candles5.forEach(c => { scan(c.high_e4); scan(c.low_e4); });
+    const visible = t => t >= t0 && t <= t1;
+    if (data.points) data.points.forEach(p => { if (visible(p.t)) scan(p.v); });
+    if (data.candles1) data.candles1.forEach(c => { if (visible(c.t)) { scan(c.high_e4); scan(c.low_e4); } });
+    if (data.candles5) data.candles5.forEach(c => { if (visible(c.t)) { scan(c.high_e4); scan(c.low_e4); } });
     for (const p of state.positions) { scan(p.entry_price_e4); scan(p.liq_price_e4); }
     if (hi === -Infinity) { lo = 50000; hi = 50100; }
     // 上下各留 10% padding
     if (hi === lo) { hi += 50; lo -= 50; }
     const pad = (hi - lo) * 0.10;
     lo -= pad; hi += pad;
-
-    // ─ x 域（60 分鐘時間軸；新聞點擊可平移） ─
-    let t0 = this.firstCandleTime();
-    let t1 = state.serverNow + 90 * 1000;
-    const ft = state.ui.focusEventTickId;
-    if (ft != null) {
-      const fEv = state.events.find(e => e.tick_id === ft);
-      if (fEv) {
-        const ftm = eventTimeMs(fEv);
-        if (ftm < t0 || ftm > t1) { t0 = ftm - 50 * 60000; t1 = ftm + 10 * 60000; }
-      }
-    }
-    if (t1 - t0 < 60 * 60000) t0 = t1 - 60 * 60000;
 
     const plot = { x: padL, y: padT, w: w - padR - padL, h: h - padB - padT };
     const V = this.view = {
@@ -189,7 +190,8 @@ export class Chart {
 
     // ─ x 標籤（HH:MM） ─
     ctx.textAlign = 'center';
-    const slotMin = 15 * 60000;
+    const rangeMin = rangeMs / 60000;
+    const slotMin = (rangeMin <= 60 ? 15 : rangeMin <= 240 ? 30 : 60) * 60000;
     for (let t = Math.ceil(t0 / slotMin) * slotMin; t <= t1; t += slotMin) {
       const x = Math.round(V.timeToX(t)) + .5;
       if (x < plot.x || x > plot.x + plot.w) continue;
@@ -340,11 +342,14 @@ export class Chart {
   }
 
   drawCandles(ctx, V, list, getTimeCandle) {
-    const cw = V.plot.w / Math.max(list.length, 1);
+    const firstT = list.length ? getTimeCandle(list[0]).t : V.t0;
+    const secondT = list.length > 1 ? getTimeCandle(list[1]).t : firstT + 60000;
+    const step = Math.max(1, Math.abs(secondT - firstT));
+    const cw = V.plot.w * step / Math.max(V.t1 - V.t0, 1);
     const bodyW = Math.max(2, Math.min(cw - 2, 11));
     for (const c of list) {
       const { t } = getTimeCandle(c);
-      const x = V.timeToX(t + 30000); // K 中央
+      const x = V.timeToX(t + step / 2); // K 中央
       if (x < V.plot.x - 20 || x > V.plot.x + V.plot.w + 20) continue;
       const up = c.close_e4 >= c.open_e4;
       const color = up ? COLORS.up : COLORS.down;
@@ -371,7 +376,9 @@ export class Chart {
     const s = this.setup(this.sub);
     if (!s) return;
     const { ctx, w, h } = s;
-    const arr = netNotionalSeries();
+    const all = netNotionalSeries();
+    const keep = Math.max(2, Math.ceil(state.ui.chartRange ?? 60) + 1);
+    const arr = all.slice(-keep);
     if (!arr.length) return;
     const padR = 62;
     const maxV = Math.max(Math.abs(...arr), 1000) * 1.1;

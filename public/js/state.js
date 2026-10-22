@@ -38,6 +38,7 @@ export const state = {
   // UI（非 contract 資料）
   ui: {
     chartMode: 'line',     // line | m1 | m5
+    chartRange: 60,        // 顯示區間（分鐘）：60 / 240 / 600
     newsOpen: true,
     focusEventTickId: null,
     crosshair: null,
@@ -213,7 +214,7 @@ export function chartData() {
     }
     return { candles5: [...groups.values()] };
   }
-  return { candles1: src.slice(-300).map(c => ({ ...c, t: candleTimeMS(c) })) };
+  return { candles1: src.slice(-600).map(c => ({ ...c, t: candleTimeMS(c) })) };
 }
 
 export function candleTimeMS(c, i = 0) {
