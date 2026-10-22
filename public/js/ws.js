@@ -2,8 +2,8 @@
    mock：本地模擬伺服器。兩者共用同一種訊息介面（contract 形狀），App 不需知道差別。
    M3：handshake 被 1008 unauthorized 關閉 → 停止重連，交由 App 的登入流程裁決。 */
 
-import { createMockServer } from './mock.js?v=8';
-import { BASE } from './util.js?v=8';
+import { createMockServer } from './mock.js?v=9';
+import { BASE } from './util.js?v=9';
 
 export function createTransport({ mock, userId, onStatus, onMessage, onUnauthorized, mockOpts = {} }) {
 

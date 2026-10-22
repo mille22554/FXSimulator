@@ -1,8 +1,8 @@
 /* chart.js — Canvas 2D 走勢圖（主圖）＋全服淨部位副圖。
    redraw 條件：tick 常壓送、指標移動、resize；形成 K 只在 tick 級別更新。 */
 
-import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=8';
-import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=8';
+import { state, chartData, netNotionalSeries, candleTimeMS } from './state.js?v=9';
+import { fmtPrice, fmtHHMM, fmtCompactA } from './util.js?v=9';
 
 const COLORS = {
   grid: '#161c28',
@@ -273,8 +273,11 @@ export class Chart {
       const { t } = getTimeCandle(c);
       const x = V.timeToX(t + step / 2); // K 中央
       if (x < V.plot.x - 20 || x > V.plot.x + V.plot.w + 20) continue;
-      const o = Number(c.open_e4), h = Number(c.high_e4), l = Number(c.low_e4), cl = Number(c.close_e4);
-      if (![o, h, l, cl].every(Number.isFinite)) continue;
+      const o = Number(c.open_e4), cl = Number(c.close_e4);
+      if (!Number.isFinite(o) || !Number.isFinite(cl)) continue;
+      // 影線缺值時退回實體範圍，確保細線一定連著粗線、不會整根消失
+      let h = Number(c.high_e4); if (!Number.isFinite(h)) h = Math.max(o, cl);
+      let l = Number(c.low_e4);  if (!Number.isFinite(l)) l = Math.min(o, cl);
       const hi = Math.max(h, o, cl), lo = Math.min(l, o, cl);
       const up = cl >= o;
       const color = up ? COLORS.up : COLORS.down;

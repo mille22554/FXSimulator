@@ -2,7 +2,7 @@
    原則（m3-auth §7）：不由 client 判斷 session 過期；一切以 /api/me 回應
    與 WS close code（1008 unauthorized）為準。 */
 
-import { $, api } from './util.js?v=8';
+import { $, api } from './util.js?v=9';
 
 const MOCK_USER = { id: 'mock', email: 'mock@fxsimulator.test', name: '模擬預覽', avatar_url: null };
 

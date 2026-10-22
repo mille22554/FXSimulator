@@ -160,9 +160,15 @@ export function advanceForming() {
 
   const p = state.market.price_e4;
   if (p != null) {
-    if (p > state.forming.high_e4) state.forming.high_e4 = p;
-    if (p < state.forming.low_e4) state.forming.low_e4 = p;
-    state.forming.close_e4 = p;
+    const f = state.forming;
+    // 伺服器 snapshot 帶進來的 forming 可能缺 high/low（undefined）→ `p > undefined` 恆為 false，
+    // 會導致影線永遠不更新（看起來像細線比粗線慢半拍）。這裡一律先補成有限數。
+    if (!Number.isFinite(f.high_e4)) f.high_e4 = p;
+    if (!Number.isFinite(f.low_e4)) f.low_e4 = p;
+    if (!Number.isFinite(f.open_e4)) f.open_e4 = p;
+    if (p > f.high_e4) f.high_e4 = p;
+    if (p < f.low_e4) f.low_e4 = p;
+    f.close_e4 = p;
   }
   state.forming.net_notional_milli = state.market.net_notional_milli ?? state.forming.net_notional_milli;
 }
