@@ -535,6 +535,7 @@ input[type="range"]::-moz-range-thumb {
   border-radius: 0 0 8px 8px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, .55);
 }
+.ev-banner[hidden] { display: none; }
 .ev-banner.show { animation: slideDown 4s both; }
 @keyframes slideDown {
   0% { transform: translate(-50%, -110%); }
